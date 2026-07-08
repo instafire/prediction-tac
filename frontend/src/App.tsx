@@ -17,7 +17,7 @@ import { playSound } from "./lib/sounds";
 import { loadJournal, pushJournal, clearJournal, type TxEntry } from "./lib/txJournal";
 
 // ─── Runtime config (admin-settable, overrides build-time env) ───
-interface RuntimeConfig { contract?: string; rpc?: string; chain?: "mainnet" | "testnet" }
+interface RuntimeConfig { contract?: string; rpc?: string; chain?: "mainnet" | "testnet" | "local" }
 function loadRuntimeConfig(): RuntimeConfig {
   try {
     const raw = JSON.parse(localStorage.getItem("ptac-config") || "{}");
@@ -27,15 +27,24 @@ function loadRuntimeConfig(): RuntimeConfig {
 function saveRuntimeConfig(cfg: RuntimeConfig) {
   try { localStorage.setItem("ptac-config", JSON.stringify(cfg)) } catch {}
 }
+function isValidRpc(url: string): boolean {
+  return /^https?:\/\//i.test(url);
+}
 const RT_CONFIG = loadRuntimeConfig();
 const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
 const ENV_CONTRACT = (import.meta.env.VITE_CONTRACT_ADDRESS as string) || ZERO_ADDR;
 const CONTRACT_ADDRESS = (RT_CONFIG.contract && ethers.isAddress(RT_CONFIG.contract) ? RT_CONFIG.contract : ENV_CONTRACT);
-const TAC_RPC = RT_CONFIG.rpc || (import.meta.env.VITE_TAC_RPC as string) || "https://rpc.tac.build";
+const ENV_CHAIN = ((import.meta.env.VITE_CHAIN as string) || "").toLowerCase();
+const CHAIN_PREF = RT_CONFIG.chain || (ENV_CHAIN === "local" || ENV_CHAIN === "testnet" || ENV_CHAIN === "mainnet" ? ENV_CHAIN as RuntimeConfig["chain"] : "mainnet");
+const TAC_RPC = RT_CONFIG.rpc
+  || (import.meta.env.VITE_TAC_RPC as string)
+  || (CHAIN_PREF === "local" ? "http://127.0.0.1:8545" : "https://rpc.tac.build");
 const TAC_CHAIN_ID = "0xEF";
 const TAC_CHAIN_ID_TESTNET = "0x957";
-const ACTIVE_CHAIN = RT_CONFIG.chain === "testnet" ? TAC_CHAIN_ID_TESTNET : TAC_CHAIN_ID;
-const ACTIVE_CHAIN_NAME = RT_CONFIG.chain === "testnet" ? "TAC Testnet" : "TAC Mainnet";
+const LOCAL_CHAIN_ID = "0x7A69"; // 31337 Anvil
+const ACTIVE_CHAIN = CHAIN_PREF === "local" ? LOCAL_CHAIN_ID : CHAIN_PREF === "testnet" ? TAC_CHAIN_ID_TESTNET : TAC_CHAIN_ID;
+const ACTIVE_CHAIN_NAME = CHAIN_PREF === "local" ? "Local Anvil" : CHAIN_PREF === "testnet" ? "TAC Testnet" : "TAC Mainnet";
+const NATIVE_SYMBOL = CHAIN_PREF === "local" ? "ETH" : "TAC";
 const NOT_DEPLOYED = CONTRACT_ADDRESS === ZERO_ADDR;
 
 const CATEGORIES = ["crypto", "politics", "sports", "tech", "culture", "misc"] as const;
@@ -861,9 +870,11 @@ export default function App() {
           await window.ethereum.request({
             method: "wallet_addEthereumChain",
             params: [{
-              chainId: ACTIVE_CHAIN, chainName: ACTIVE_CHAIN_NAME, rpcUrls: [TAC_RPC],
-              nativeCurrency: { name: "TAC", symbol: "TAC", decimals: 18 },
-              blockExplorerUrls: ["https://explorer.tac.build"],
+              chainId: ACTIVE_CHAIN,
+              chainName: ACTIVE_CHAIN_NAME,
+              rpcUrls: [TAC_RPC],
+              nativeCurrency: { name: NATIVE_SYMBOL, symbol: NATIVE_SYMBOL, decimals: 18 },
+              blockExplorerUrls: CHAIN_PREF === "local" ? [] : ["https://explorer.tac.build"],
             }],
           });
         });
@@ -871,9 +882,9 @@ export default function App() {
       const s = await p.getSigner();
       setSigner(s); setAccount(accs[0]);
       showConnectionPulse();
-      notify("Wallet connected ⚡");
+      notify(CHAIN_PREF === "local" ? "Wallet connected to Local Anvil ⚡" : "Wallet connected ⚡");
       const cid = await window.ethereum.request({ method: "eth_chainId" });
-      setChainOk(cid === ACTIVE_CHAIN || cid === TAC_CHAIN_ID_TESTNET);
+      setChainOk(cid === ACTIVE_CHAIN || cid === TAC_CHAIN_ID_TESTNET || cid === LOCAL_CHAIN_ID);
     } catch (e: any) { notify(e?.shortMessage || e?.message || "Connection failed", true) }
   }
 
@@ -2602,24 +2613,25 @@ export default function App() {
                     {configDraft.contract && !ethers.isAddress(configDraft.contract) && <em className="lc-err">Not a valid EVM address</em>}
                   </label>
                   <label>RPC endpoint
-                    <input placeholder="https://rpc.tac.build" value={configDraft.rpc || ""} onChange={e => setConfigDraft({ ...configDraft, rpc: e.target.value.trim() })} />
-                    {configDraft.rpc && !/^https:\/\//.test(configDraft.rpc) && <em className="lc-err">Must be an https:// URL</em>}
+                    <input placeholder="http://127.0.0.1:8545 or https://rpc.tac.build" value={configDraft.rpc || ""} onChange={e => setConfigDraft({ ...configDraft, rpc: e.target.value.trim() })} />
+                    {configDraft.rpc && !isValidRpc(configDraft.rpc) && <em className="lc-err">Must be an http(s):// URL</em>}
                   </label>
                   <label>Network
-                    <select value={configDraft.chain || "mainnet"} onChange={e => setConfigDraft({ ...configDraft, chain: e.target.value as "mainnet" | "testnet" })}>
+                    <select value={configDraft.chain || "mainnet"} onChange={e => setConfigDraft({ ...configDraft, chain: e.target.value as "mainnet" | "testnet" | "local" })}>
                       <option value="mainnet">TAC Mainnet (chain 239 / 0xEF)</option>
                       <option value="testnet">TAC Testnet (chain 2391 / 0x957)</option>
+                      <option value="local">Local Anvil (chain 31337 / 0x7A69)</option>
                     </select>
                   </label>
                 </div>
                 <div className="lc-actions">
                   <button
                     className="btn-submit"
-                    disabled={!!(configDraft.contract && !ethers.isAddress(configDraft.contract)) || !!(configDraft.rpc && !/^https:\/\//.test(configDraft.rpc))}
+                    disabled={!!(configDraft.contract && !ethers.isAddress(configDraft.contract)) || !!(configDraft.rpc && !isValidRpc(configDraft.rpc))}
                     onClick={() => {
                       const cfg: RuntimeConfig = {};
                       if (configDraft.contract && ethers.isAddress(configDraft.contract)) cfg.contract = configDraft.contract;
-                      if (configDraft.rpc && /^https:\/\//.test(configDraft.rpc)) cfg.rpc = configDraft.rpc;
+                      if (configDraft.rpc && isValidRpc(configDraft.rpc)) cfg.rpc = configDraft.rpc;
                       if (configDraft.chain) cfg.chain = configDraft.chain;
                       saveRuntimeConfig(cfg);
                       notify("Config saved — reloading with live settings…");
