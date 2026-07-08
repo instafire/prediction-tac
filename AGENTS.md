@@ -18,7 +18,9 @@ Peer-to-peer prediction market dApp for the TAC blockchain (EVM layer connected 
 ## Contract notes (V3)
 - Vault deposit/withdraw, create, bet, sellPosition, resolve, dispute, cancel, refundExpired, claim, claimRefund.
 - Owner trust model for resolution; fee cap 5%; reentrancy guards; solvencyCheck.
-- Future (not shipped): `claimMany(ids[])`, market pagination views, multi-outcome markets — keep V3 API stable for the current frontend ABI.
+- **Shipped upgrades:** `claimMany`, `createMarketWithSource`, `createMultiMarket` (2–8 outcomes), `betOutcome` / `resolveOutcome` / `resolveMultiDispute`, `getMarketMeta`, `getMultiMarket`, `getMarketsPage`, `postComment` (event-log comments).
+- Tests: `forge test` — PredictionPoolV3Test (35) + PredictionPoolV3FeaturesTest (6) + legacy suites.
+- ABI: after `forge build`, export `out/PredictionPoolV3.sol/PredictionPoolV3.json` → `frontend/src/abi.json`.
 
 ## UI/UX notes (July 2026 redesign, round 2)
 - Themes: 4 palettes defined in `src/App.css` under `html[data-theme=...]` — midnight (default), terminal, degen, ledger. Cycled via the Palette button in the nav; persisted in `localStorage("ptac-theme")`. `index.html` sets `data-theme="midnight"` as the initial value.

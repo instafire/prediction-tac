@@ -86,10 +86,30 @@ interface Market {
   resolutionTime: number; createdAt: number; totalYesPool: bigint; totalNoPool: bigint;
   status: number; winner: number; yesBettors: number; noBettors: number;
   mySide: number; myAmount: bigint; myClaimed: boolean; potYes: bigint; potNo: bigint;
+  resolutionSource?: string;
+  outcomeCount?: number; // 2 = binary, 3+ = multi
+  outcomeLabels?: string[];
+  outcomePools?: bigint[];
+  outcomeBettors?: number[];
+  myOutcomeIndex?: number; // multi: 0-based; -1 none
+  winnerOutcome?: number;
 }
 interface Activity { type: string; text: string; time: number; block: number }
 interface PricePoint { t: number; yes: number }
 interface Leader { addr: string; volume: bigint; bets: number; wins: number }
+interface MarketComment { marketId: number; author: string; body: string; time: number }
+
+function loadComments(): MarketComment[] {
+  try { return JSON.parse(localStorage.getItem("ptac-comments") || "[]") } catch { return [] }
+}
+function saveComments(c: MarketComment[]) {
+  try { localStorage.setItem("ptac-comments", JSON.stringify(c.slice(0, 200))) } catch {}
+}
+function multiOdds(pools: bigint[]): number[] {
+  const total = pools.reduce((a, b) => a + b, 0n);
+  if (total === 0n) return pools.map(() => Math.round(1000 / pools.length) / 10);
+  return pools.map(p => Math.round(Number((p * 1000n) / total)) / 10);
+}
 
 declare global { interface Window { ethereum?: any; Telegram?: { WebApp?: any } } }
 
@@ -166,6 +186,7 @@ function buildDemoData(nowSec: number) {
     hoursLeft: number, yes: string, no: string, yesB: number, noB: number,
     status = STATUS.Open as number, winner = SIDE.None as number,
     mySide = SIDE.None as number, myAmount = "0",
+    resolutionSource = "",
   ): Market => ({
     id, creator: "0xd3a0000000000000000000000000000000000001", question, description, category,
     resolutionTime: nowSec + Math.round(hoursLeft * 3600),
@@ -173,18 +194,43 @@ function buildDemoData(nowSec: number) {
     totalYesPool: E(yes), totalNoPool: E(no), status, winner,
     yesBettors: yesB, noBettors: noB,
     mySide, myAmount: E(myAmount), myClaimed: false,
-    potYes: mySide === SIDE.Yes ? E(myAmount) * (E(yes) + E(no)) / E(yes) : 0n,
-    potNo: mySide === SIDE.No ? E(myAmount) * (E(yes) + E(no)) / E(no) : 0n,
+    potYes: mySide === SIDE.Yes && E(yes) > 0n ? E(myAmount) * (E(yes) + E(no)) / E(yes) : 0n,
+    potNo: mySide === SIDE.No && E(no) > 0n ? E(myAmount) * (E(yes) + E(no)) / E(no) : 0n,
+    resolutionSource,
+    outcomeCount: 2,
+    outcomeLabels: ["YES", "NO"],
+    outcomePools: [E(yes), E(no)],
+    outcomeBettors: [yesB, noB],
+    myOutcomeIndex: mySide === SIDE.Yes ? 0 : mySide === SIDE.No ? 1 : -1,
+    winnerOutcome: winner === SIDE.Yes ? 0 : winner === SIDE.No ? 1 : 0,
   });
+  const multi: Market = {
+    id: 10, creator: "0xd3a0000000000000000000000000000000000001",
+    question: "Which chain wins Q3 developer mindshare?",
+    description: "Resolves to the ecosystem with the highest Electric Capital developer report rank shift.",
+    category: "tech",
+    resolutionTime: nowSec + 120 * 3600,
+    createdAt: nowSec - 40 * 3600,
+    totalYesPool: 0n, totalNoPool: 0n, status: STATUS.Open, winner: SIDE.None,
+    yesBettors: 0, noBettors: 0, mySide: SIDE.None, myAmount: 0n, myClaimed: false, potYes: 0n, potNo: 0n,
+    resolutionSource: "https://www.developerreport.com",
+    outcomeCount: 4,
+    outcomeLabels: ["TON / TAC", "Solana", "Base", "Other L2"],
+    outcomePools: [E("2100"), E("1800"), E("1500"), E("900")],
+    outcomeBettors: [18, 15, 12, 9],
+    myOutcomeIndex: -1,
+    winnerOutcome: 0,
+  };
   const markets: Market[] = [
-    mk(9, "Will TAC hit a new all-time-high volume this month?", "Resolves YES if TAC daily DEX volume sets a new record before month end (source: tac.build analytics).", "crypto", 96, "4200", "2800", 34, 21, STATUS.Open, SIDE.None, SIDE.Yes, "120"),
-    mk(8, "Will BTC close above $120k this Friday?", "Based on Coinbase BTC-USD daily close, UTC.", "crypto", 30, "1850", "2400", 28, 33, STATUS.Open, SIDE.None, SIDE.No, "40"),
-    mk(7, "Will a Telegram Mini App pass 100M MAU this quarter?", "Any TON-ecosystem mini app; official Telegram or project announcements count.", "tech", 41, "980", "1420", 17, 22),
-    mk(6, "Will the next World Cup qualifier end in a draw?", "Official FIFA result at 90 minutes plus stoppage.", "sports", 18, "310", "540", 9, 14),
-    mk(5, "Will it rain in Toronto tomorrow?", "Resolves YES if Environment Canada records ≥1mm precipitation at Toronto City station.", "misc", 14, "95", "150", 8, 11),
-    mk(4, "Will TON stay in the top-15 by market cap this week?", "CoinGecko ranking snapshot Sunday 23:59 UTC.", "crypto", 60, "760", "240", 19, 6),
+    multi,
+    mk(9, "Will TAC hit a new all-time-high volume this month?", "Resolves YES if TAC daily DEX volume sets a new record before month end (source: tac.build analytics).", "crypto", 96, "4200", "2800", 34, 21, STATUS.Open, SIDE.None, SIDE.Yes, "120", "https://tac.build/analytics"),
+    mk(8, "Will BTC close above $120k this Friday?", "Based on Coinbase BTC-USD daily close, UTC.", "crypto", 30, "1850", "2400", 28, 33, STATUS.Open, SIDE.None, SIDE.No, "40", "Coinbase BTC-USD"),
+    mk(7, "Will a Telegram Mini App pass 100M MAU this quarter?", "Any TON-ecosystem mini app; official Telegram or project announcements count.", "tech", 41, "980", "1420", 17, 22, STATUS.Open, SIDE.None, SIDE.None, "0", "Telegram / project blogs"),
+    mk(6, "Will the next World Cup qualifier end in a draw?", "Official FIFA result at 90 minutes plus stoppage.", "sports", 18, "310", "540", 9, 14, STATUS.Open, SIDE.None, SIDE.None, "0", "FIFA.com"),
+    mk(5, "Will it rain in Toronto tomorrow?", "Resolves YES if Environment Canada records ≥1mm precipitation at Toronto City station.", "misc", 14, "95", "150", 8, 11, STATUS.Open, SIDE.None, SIDE.None, "0", "Environment Canada"),
+    mk(4, "Will TON stay in the top-15 by market cap this week?", "CoinGecko ranking snapshot Sunday 23:59 UTC.", "crypto", 60, "760", "240", 19, 6, STATUS.Open, SIDE.None, SIDE.None, "0", "CoinGecko"),
     mk(3, "Will the new blockbuster cross $1B worldwide?", "Box Office Mojo worldwide gross by end of run.", "culture", 200, "420", "580", 12, 15),
-    mk(2, "Did ETH close above $4k last Friday?", "Resolved from Coinbase ETH-USD daily close.", "crypto", -30, "1200", "800", 22, 15, STATUS.Resolved, SIDE.Yes, SIDE.Yes, "50"),
+    mk(2, "Did ETH close above $4k last Friday?", "Resolved from Coinbase ETH-USD daily close.", "crypto", -30, "1200", "800", 22, 15, STATUS.Resolved, SIDE.Yes, SIDE.Yes, "50", "Coinbase ETH-USD"),
     mk(1, "Was the launch delayed again?", "Resolved from the official mission page.", "tech", -80, "300", "700", 7, 16, STATUS.Resolved, SIDE.No),
   ];
   const hist: Record<number, PricePoint[]> = {};
@@ -555,6 +601,12 @@ export default function App() {
   const [cat, setCat] = useState("crypto");
   const [stake, setStake] = useState("10");
   const [duration, setDuration] = useState("7 days");
+  const [resolutionSource, setResolutionSource] = useState("");
+  const [multiMode, setMultiMode] = useState(false);
+  const [outcomeDrafts, setOutcomeDrafts] = useState<string[]>(["YES", "NO", ""]);
+  const [comments, setComments] = useState<MarketComment[]>(() => loadComments());
+  const [commentDraft, setCommentDraft] = useState<Record<number, string>>({});
+  const [multiPick, setMultiPick] = useState<Record<number, number>>({});
   const [depositAmt, setDepositAmt] = useState("50");
   const [withdrawAmt, setWithdrawAmt] = useState("");
   const [betAmt, setBetAmt] = useState<Record<number, string>>({});
@@ -862,19 +914,59 @@ export default function App() {
       const total = Number(count);
       const ids = Array.from({ length: total }, (_, i) => i + 1);
       const infos = await Promise.all(ids.map(i => c.getMarketInfo(i)));
+      const metas = await Promise.all(ids.map(i => c.getMarketMeta(i).catch(() => null)));
+      const multis = await Promise.all(ids.map(i => c.getMultiMarket(i).catch(() => null)));
       const bets = acc ? await Promise.all(ids.map(i => c.getUserBet(i, acc).catch(() => null))) : [];
+      const multiBets = acc ? await Promise.all(ids.map(i => c.getUserMultiBet(i, acc).catch(() => null))) : [];
       const pots = acc ? await Promise.all(ids.map(i => c.getPotentialPayout(i, acc).catch(() => null))) : [];
 
+      // Index comments from events
+      try {
+        const cur = await readProvider.getBlockNumber();
+        const from = Math.max(0, cur - 45000);
+        const commentLogs = await c.queryFilter(c.filters.CommentPosted?.() ?? "CommentPosted", from, cur).catch(() => []);
+        const fromChain: MarketComment[] = [];
+        for (const ev of commentLogs as ethers.EventLog[]) {
+          if (!ev.args) continue;
+          fromChain.push({
+            marketId: Number(ev.args.marketId),
+            author: String(ev.args.author),
+            body: String(ev.args.body),
+            time: Number(ev.args.timestamp || 0),
+          });
+        }
+        if (fromChain.length) {
+          const merged = [...fromChain, ...loadComments().filter(x => !fromChain.some(y => y.time === x.time && y.body === x.body))];
+          setComments(merged);
+          saveComments(merged);
+        }
+      } catch { /* best-effort */ }
+
       const out: Market[] = ids.map((id, idx) => {
-        const m = infos[idx], ub = bets[idx], pp = pots[idx];
+        const m = infos[idx], ub = bets[idx], pp = pots[idx], meta = metas[idx], multi = multis[idx], mb = multiBets[idx];
+        const oc = meta ? Number(meta.outcomeCount || 2) : 2;
+        const labels: string[] = multi ? [...multi.labels] : ["YES", "NO"];
+        const pools: bigint[] = multi ? multi.pools.map((p: bigint) => p) : [m.totalYesPool, m.totalNoPool];
+        const bettors: number[] = multi ? multi.bettors.map((b: number) => Number(b)) : [Number(m.yesBettors), Number(m.noBettors)];
+        let myOutcomeIndex = -1;
+        if (mb && Number(mb.outcomeIndex) !== 255) myOutcomeIndex = Number(mb.outcomeIndex);
+        else if (ub && Number(ub.side) === 1) myOutcomeIndex = 0;
+        else if (ub && Number(ub.side) === 2) myOutcomeIndex = 1;
         return {
           id, creator: m.creator, question: m.question, description: m.description,
           category: m.category, resolutionTime: Number(m.resolutionTime), createdAt: Number(m.createdAt),
           totalYesPool: m.totalYesPool, totalNoPool: m.totalNoPool,
           status: Number(m.status), winner: Number(m.winner),
           yesBettors: Number(m.yesBettors), noBettors: Number(m.noBettors),
-          mySide: ub ? Number(ub.side) : 0, myAmount: ub ? ub.amount : 0n, myClaimed: ub ? ub.claimed : false,
+          mySide: ub ? Number(ub.side) : 0, myAmount: ub ? ub.amount : (mb ? mb.amount : 0n), myClaimed: ub ? ub.claimed : (mb ? mb.claimed : false),
           potYes: pp ? pp.ifYes : 0n, potNo: pp ? pp.ifNo : 0n,
+          resolutionSource: meta ? String(meta.resolutionSource || "") : "",
+          outcomeCount: oc,
+          outcomeLabels: labels,
+          outcomePools: pools,
+          outcomeBettors: bettors,
+          myOutcomeIndex,
+          winnerOutcome: meta ? Number(meta.winnerOutcome || 0) : 0,
         };
       });
       out.sort((a, b) => b.createdAt - a.createdAt);
@@ -1056,26 +1148,120 @@ export default function App() {
     if (!amt || amt < 0.01) return notify("Stake ≥ 0.01 TAC", true);
     if (ethers.parseEther(stake) > vaultBalance) return notify("Insufficient vault — deposit first", true);
     const rt = Math.floor(Date.now() / 1000) + DURATIONS[duration] * 86400;
+    const labels = multiMode
+      ? outcomeDrafts.map(s => s.trim()).filter(Boolean)
+      : ["YES", "NO"];
+    if (multiMode && (labels.length < 2 || labels.length > 8)) return notify("Need 2–8 outcomes", true);
+    const isMulti = multiMode && labels.length >= 3;
+    const seedLabel = labels[0] || "YES";
     if (NOT_DEPLOYED) {
       const wei = ethers.parseEther(stake);
-      tx("create", async () => null, "Market live — you're staked on YES 🎯", true).then(() => {
+      tx("create", async () => null, `Market live — staked on ${seedLabel} 🎯`, true).then(() => {
         setMarkets(ms => {
           const nid = Math.max(0, ...ms.map(m => m.id)) + 1;
+          const pools = labels.map((_, i) => i === 0 ? wei : 0n);
+          const bettors = labels.map((_, i) => i === 0 ? 1 : 0);
           return [{
             id: nid, creator: account || "0xDE300000000000000000000000000000000000AC",
             question: q, description: desc, category: cat,
             resolutionTime: rt, createdAt: Math.floor(Date.now() / 1000),
-            totalYesPool: wei, totalNoPool: 0n, status: STATUS.Open, winner: SIDE.None,
-            yesBettors: 1, noBettors: 0, mySide: SIDE.Yes, myAmount: wei, myClaimed: false, potYes: 0n, potNo: 0n,
+            totalYesPool: !isMulti ? wei : 0n, totalNoPool: 0n, status: STATUS.Open, winner: SIDE.None,
+            yesBettors: !isMulti ? 1 : 0, noBettors: 0,
+            mySide: !isMulti ? SIDE.Yes : SIDE.None,
+            myAmount: wei, myClaimed: false, potYes: 0n, potNo: 0n,
+            resolutionSource,
+            outcomeCount: labels.length,
+            outcomeLabels: labels,
+            outcomePools: pools,
+            outcomeBettors: bettors,
+            myOutcomeIndex: 0,
+            winnerOutcome: 0,
           }, ...ms];
         });
         setVaultBalance(v => v - wei);
-        setShowCreate(false); setQ(""); setDesc("");
+        setShowCreate(false); setQ(""); setDesc(""); setResolutionSource("");
       });
       return;
     }
-    tx("create", () => contract(true).createMarket(q, desc, cat, rt, ethers.parseEther(stake)),
-      "Market live — you're staked on YES 🎯", true).then(() => { setShowCreate(false); setQ(""); setDesc("") });
+    const c = contract(true);
+    const wei = ethers.parseEther(stake);
+    const fn = isMulti
+      ? () => c.createMultiMarket(q, desc, cat, resolutionSource, rt, wei, labels)
+      : resolutionSource
+        ? () => c.createMarketWithSource(q, desc, cat, resolutionSource, rt, wei)
+        : () => c.createMarket(q, desc, cat, rt, wei);
+    tx("create", fn, `Market live — staked on ${seedLabel} 🎯`, true).then(() => {
+      setShowCreate(false); setQ(""); setDesc(""); setResolutionSource("");
+    });
+  };
+
+  const betOutcome = (id: number, outcomeIndex: number) => {
+    const amt = betAmt[id] || "5";
+    let wei: bigint;
+    try { wei = ethers.parseEther(amt) } catch { return notify("Invalid amount", true) }
+    if (wei < ethers.parseEther("0.01")) return notify("Minimum bet is 0.01 TAC", true);
+    if (wei > vaultBalance) return notify("Insufficient vault balance — deposit first", true);
+    const mkt = markets.find(m => m.id === id);
+    if (!mkt) return;
+    const labels = mkt.outcomeLabels || ["YES", "NO"];
+    if (mkt.myOutcomeIndex !== undefined && mkt.myOutcomeIndex >= 0 && mkt.myOutcomeIndex !== outcomeIndex) {
+      return notify(`You're on ${labels[mkt.myOutcomeIndex]} — sell first to switch`, true);
+    }
+    if (NOT_DEPLOYED) {
+      const fee = wei * BigInt(protocolFee) / 1000n;
+      const net = wei - fee;
+      tx(`bet-${id}`, async () => null, `${amt} TAC on ${labels[outcomeIndex]} ⚡`).then(() => {
+        setMarkets(ms => ms.map(m => {
+          if (m.id !== id) return m;
+          const pools = [...(m.outcomePools || [m.totalYesPool, m.totalNoPool])];
+          const bettors = [...(m.outcomeBettors || [m.yesBettors, m.noBettors])];
+          pools[outcomeIndex] = (pools[outcomeIndex] || 0n) + net;
+          if ((m.myOutcomeIndex ?? -1) < 0) bettors[outcomeIndex] = (bettors[outcomeIndex] || 0) + 1;
+          const isBinary = (m.outcomeCount || 2) <= 2;
+          return {
+            ...m,
+            outcomePools: pools,
+            outcomeBettors: bettors,
+            myOutcomeIndex: outcomeIndex,
+            myAmount: m.myAmount + net,
+            mySide: isBinary ? (outcomeIndex === 0 ? SIDE.Yes : SIDE.No) : m.mySide,
+            totalYesPool: isBinary && outcomeIndex === 0 ? m.totalYesPool + net : m.totalYesPool,
+            totalNoPool: isBinary && outcomeIndex === 1 ? m.totalNoPool + net : m.totalNoPool,
+          };
+        }));
+        setVaultBalance(v => v - wei);
+        questBump("conviction");
+      });
+      return;
+    }
+    tx(`bet-${id}`, () => contract(true).betOutcome(id, outcomeIndex, wei), `${amt} TAC on ${labels[outcomeIndex]} ⚡`).then(() => questBump("conviction"));
+  };
+
+  const postComment = (marketId: number) => {
+    const body = (commentDraft[marketId] || "").trim();
+    if (!body) return notify("Write a comment first", true);
+    if (body.length > 280) return notify("Max 280 characters", true);
+    if (NOT_DEPLOYED) {
+      const entry: MarketComment = {
+        marketId, author: account || "0xdemo", body, time: Math.floor(Date.now() / 1000),
+      };
+      const next = [entry, ...comments];
+      setComments(next);
+      saveComments(next);
+      setCommentDraft(d => ({ ...d, [marketId]: "" }));
+      notify("Comment posted (demo)");
+      return;
+    }
+    if (!account) return notify("Connect wallet first", true);
+    tx(`comment-${marketId}`, () => contract(true).postComment(marketId, body), "Comment posted").then(() => {
+      const entry: MarketComment = {
+        marketId, author: account, body, time: Math.floor(Date.now() / 1000),
+      };
+      const next = [entry, ...comments];
+      setComments(next);
+      saveComments(next);
+      setCommentDraft(d => ({ ...d, [marketId]: "" }));
+    });
   };
   const bet = (id: number, side: 1 | 2) => {
     const amt = betAmt[id] || "5";
@@ -1262,10 +1448,15 @@ export default function App() {
   const disputedMarkets = markets.filter(m => m.status === STATUS.Disputed);
   const awaitingResolution = markets.filter(m => m.status === STATUS.Open && now >= m.resolutionTime && m.totalYesPool > 0n && m.totalNoPool > 0n);
   const isCreator = (m: Market) => account && m.creator.toLowerCase() === account.toLowerCase();
-  const claimable = markets.filter(m =>
-    (m.status === STATUS.Resolved && !m.myClaimed && m.mySide === m.winner && m.mySide !== SIDE.None) ||
-    ((m.status === STATUS.Refunded || m.status === STATUS.Cancelled) && !m.myClaimed && m.mySide !== SIDE.None)
-  );
+  const claimable = markets.filter(m => {
+    const multi = (m.outcomeCount || 2) > 2;
+    const won = multi
+      ? (m.myOutcomeIndex ?? -1) === (m.winnerOutcome ?? -2) && (m.myOutcomeIndex ?? -1) >= 0
+      : m.mySide === m.winner && m.mySide !== SIDE.None;
+    const hasPos = multi ? (m.myOutcomeIndex ?? -1) >= 0 : m.mySide !== SIDE.None;
+    return (m.status === STATUS.Resolved && !m.myClaimed && won) ||
+      ((m.status === STATUS.Refunded || m.status === STATUS.Cancelled) && !m.myClaimed && hasPos);
+  });
 
   // Ending-soon local alerts
   useEffect(() => {
@@ -1308,10 +1499,15 @@ export default function App() {
 
   async function claimAll() {
     if (!account || claimable.length === 0) return notify("Nothing to claim", true);
-    for (const m of claimable) {
-      if (m.status === STATUS.Resolved) await claim(m.id);
-      else await claimRefund(m.id);
+    const ids = claimable.map(m => m.id);
+    if (NOT_DEPLOYED) {
+      for (const m of claimable) {
+        if (m.status === STATUS.Resolved) await claim(m.id);
+        else await claimRefund(m.id);
+      }
+      return;
     }
+    await tx("claim-many", () => contract(true).claimMany(ids), `Claimed ${ids.length} market(s) → vault 💰`, true);
   }
 
   function finishOnboarding() {
@@ -1708,9 +1904,34 @@ export default function App() {
           {showCreate && (
             <section className="create-panel">
               <h3><Sparkles size={16} /> Create a Market</h3>
-              <p className="sub">Your stake goes on YES from your vault. Others bet against you. Winning side splits the whole pool.</p>
-              <input className="big-input" placeholder="Will X happen by Y date?" value={q} onChange={e => setQ(e.target.value)} maxLength={200} />
+              <p className="sub">Your stake seeds the first outcome from your vault. Winners split the pool. Add an oracle source so resolution is auditable.</p>
+              <div className="mode-toggle">
+                <button type="button" className={!multiMode ? "on" : ""} onClick={() => setMultiMode(false)}>Binary YES / NO</button>
+                <button type="button" className={multiMode ? "on" : ""} onClick={() => setMultiMode(true)}>Multi-outcome</button>
+              </div>
+              <input className="big-input" placeholder={multiMode ? "Who / what wins by deadline?" : "Will X happen by Y date?"} value={q} onChange={e => setQ(e.target.value)} maxLength={200} />
               <textarea placeholder="Resolution criteria — be specific: data source, exact threshold, timezone…" value={desc} onChange={e => setDesc(e.target.value)} rows={2} maxLength={1000} />
+              <input className="src-input" placeholder="Oracle / resolution source (URL or description)" value={resolutionSource} onChange={e => setResolutionSource(e.target.value)} maxLength={300} />
+              {multiMode && (
+                <div className="outcome-editor">
+                  <span className="oe-label">Outcomes (2–8) — stake seeds the first</span>
+                  {outcomeDrafts.map((o, i) => (
+                    <div key={i} className="oe-row">
+                      <input value={o} placeholder={`Outcome ${i + 1}`} maxLength={48} onChange={e => {
+                        const next = [...outcomeDrafts];
+                        next[i] = e.target.value;
+                        setOutcomeDrafts(next);
+                      }} />
+                      {outcomeDrafts.length > 2 && (
+                        <button type="button" className="icon-chip" onClick={() => setOutcomeDrafts(outcomeDrafts.filter((_, j) => j !== i))}><X size={12} /></button>
+                      )}
+                    </div>
+                  ))}
+                  {outcomeDrafts.length < 8 && (
+                    <button type="button" className="btn-ghost" onClick={() => setOutcomeDrafts([...outcomeDrafts, ""])}>+ Add outcome</button>
+                  )}
+                </div>
+              )}
               <div className="row">
                 <label>Category<select value={cat} onChange={e => setCat(e.target.value)}>{CATEGORIES.map(c => <option key={c}>{c}</option>)}</select></label>
                 <label>Duration<select value={duration} onChange={e => setDuration(e.target.value)}>{Object.keys(DURATIONS).map(d => <option key={d}>{d}</option>)}</select></label>
@@ -1718,7 +1939,9 @@ export default function App() {
               </div>
               <div className="row-end">
                 <span className="vault-note"><Landmark size={13} /> Vault: {fmt(vaultBalance)} TAC {ethers.parseEther(stake || "0") > vaultBalance && <b className="warn">— insufficient</b>}</span>
-                <button className="btn-submit" onClick={createMarket} disabled={busy.create}>{busy.create ? "Creating…" : `Create · ${stake} TAC on YES`}</button>
+                <button className="btn-submit" onClick={createMarket} disabled={busy.create}>
+                  {busy.create ? "Creating…" : `Create · ${stake} TAC on ${multiMode ? (outcomeDrafts[0] || "first") : "YES"}`}
+                </button>
               </div>
             </section>
           )}
@@ -1738,39 +1961,57 @@ export default function App() {
               const isExp = expanded === m.id;
               const open = m.status === STATUS.Open && now < m.resolutionTime;
               const ended = m.status === STATUS.Open && now >= m.resolutionTime;
-              const canClaim = m.status === STATUS.Resolved && !m.myClaimed && m.mySide === m.winner && m.mySide !== SIDE.None;
-              const canRefund = (m.status === STATUS.Refunded || m.status === STATUS.Cancelled) && !m.myClaimed && m.mySide !== SIDE.None;
-              const canDispute = m.status === STATUS.Resolved && m.mySide !== SIDE.None;
-              const canCancel = m.status === STATUS.Open && isCreator(m) && m.totalNoPool === 0n;
-              const canRexp = ended && (m.totalYesPool === 0n || m.totalNoPool === 0n);
-              const lost = m.status === STATUS.Resolved && m.mySide !== SIDE.None && m.mySide !== m.winner;
+              const isMulti = (m.outcomeCount || 2) > 2;
+              const multiWon = isMulti && m.status === STATUS.Resolved && (m.myOutcomeIndex ?? -1) === (m.winnerOutcome ?? -2);
+              const multiLost = isMulti && m.status === STATUS.Resolved && (m.myOutcomeIndex ?? -1) >= 0 && (m.myOutcomeIndex ?? -1) !== (m.winnerOutcome ?? -2);
+              const canClaim = m.status === STATUS.Resolved && !m.myClaimed && (
+                (!isMulti && m.mySide === m.winner && m.mySide !== SIDE.None) || multiWon
+              );
+              const canRefund = (m.status === STATUS.Refunded || m.status === STATUS.Cancelled) && !m.myClaimed && (m.mySide !== SIDE.None || (m.myOutcomeIndex ?? -1) >= 0);
+              const canDispute = m.status === STATUS.Resolved && (m.mySide !== SIDE.None || (m.myOutcomeIndex ?? -1) >= 0);
+              const multiTotal = (m.outcomePools || []).reduce((a, b) => a + b, 0n);
+              const canCancel = m.status === STATUS.Open && isCreator(m) && (isMulti ? multiTotal === m.myAmount : m.totalNoPool === 0n);
+              const canRexp = ended && (isMulti
+                ? (m.outcomePools || []).filter(p => p > 0n).length <= 1
+                : (m.totalYesPool === 0n || m.totalNoPool === 0n));
+              const lost = (!isMulti && m.status === STATUS.Resolved && m.mySide !== SIDE.None && m.mySide !== m.winner) || multiLost;
               const urgent = open && m.resolutionTime - now < 86400 * 2;
               const hist = priceHistory[m.id] || [];
+              const poolVol = isMulti ? multiTotal : m.totalYesPool + m.totalNoPool;
+              const bettorCount = isMulti ? (m.outcomeBettors || []).reduce((a, b) => a + b, 0) : m.yesBettors + m.noBettors;
+              const multiPcts = isMulti ? multiOdds(m.outcomePools || [0n]) : [];
+              const leadIdx = isMulti ? multiPcts.reduce((bi, v, i, arr) => v > arr[bi] ? i : bi, 0) : 0;
+              const leadPct = isMulti ? (multiPcts[leadIdx] || 0) : o.y;
+              const leadLab = isMulti ? ((m.outcomeLabels || [])[leadIdx] || "—") : "YES";
               return (
-                <div key={m.id} id={`mk-${m.id}`} className={`card ${!open ? "done" : ""} ${isExp ? "exp" : ""} ${urgent ? "hot" : ""}`} style={{ "--d": `${Math.min(idx, 8) * 55}ms` } as any}>
+                <div key={m.id} id={`mk-${m.id}`} className={`card ${!open ? "done" : ""} ${isExp ? "exp" : ""} ${urgent ? "hot" : ""} ${isMulti ? "multi" : ""}`} style={{ "--d": `${Math.min(idx, 8) * 55}ms` } as any}>
                   <div className="card-head" onClick={() => { setExpanded(isExp ? null : m.id); if (!isExp) questBump("scout"); }}>
                     <div className="ch-left">
                       <span className="cat-chip art"><CatArt cat={m.category} size={16} /> {CAT_LABEL[m.category] || m.category}</span>
+                      {isMulti && <span className="fav-chip">multi · {(m.outcomeCount || 0)} ways</span>}
                       {favoritesSet.has(m.id) && <span className="fav-chip"><Bookmark size={11} /> watched</span>}
                       {urgent && <span className="urgent-chip"><Flame size={11} /> ending soon</span>}
-                      {m.status === STATUS.Resolved && <span className={`res-chip ${m.winner === SIDE.Yes ? "y" : "n"}`}>{m.winner === SIDE.Yes ? "YES ✓" : "NO ✗"}</span>}
+                      {m.status === STATUS.Resolved && !isMulti && <span className={`res-chip ${m.winner === SIDE.Yes ? "y" : "n"}`}>{m.winner === SIDE.Yes ? "YES ✓" : "NO ✗"}</span>}
+                      {m.status === STATUS.Resolved && isMulti && <span className="res-chip y">{(m.outcomeLabels || [])[m.winnerOutcome || 0] || "?"} ✓</span>}
                       {m.status === STATUS.Disputed && <span className="res-chip d"><Scale size={11} /> DISPUTED</span>}
                       {m.status === STATUS.Cancelled && <span className="res-chip c">CANCELLED</span>}
                       {m.status === STATUS.Refunded && <span className="res-chip c">REFUNDED</span>}
-                      {m.mySide !== SIDE.None && <span className={`my-chip ${m.mySide === SIDE.Yes ? "y" : "n"}`}>you: {sideLabel(m.mySide)}</span>}
+                      {m.mySide !== SIDE.None && !isMulti && <span className={`my-chip ${m.mySide === SIDE.Yes ? "y" : "n"}`}>you: {sideLabel(m.mySide)}</span>}
+                      {isMulti && (m.myOutcomeIndex ?? -1) >= 0 && <span className="my-chip y">you: {(m.outcomeLabels || [])[m.myOutcomeIndex!]}</span>}
                     </div>
                     <div className="ch-main">
                       <h3>{m.question}</h3>
-                      {hist.length > 1 && !isExp && <Sparkline points={hist} />}
+                      {hist.length > 1 && !isExp && !isMulti && <Sparkline points={hist} />}
                     </div>
-                    <div className="ch-odds" aria-label={`YES ${o.y} percent`}>
-                      <span className="odds-yes">{o.y}%</span>
-                      <span className="odds-lbl">YES</span>
-                      <span className="odds-no">NO {o.n}%</span>
+                    <div className="ch-odds" aria-label={`${leadLab} ${leadPct} percent`}>
+                      <span className="odds-yes">{leadPct}%</span>
+                      <span className="odds-lbl">{isMulti ? leadLab.slice(0, 10) : "YES"}</span>
+                      {!isMulti && <span className="odds-no">NO {o.n}%</span>}
+                      {isMulti && <span className="odds-no">{m.outcomeCount} outcomes</span>}
                     </div>
                     <div className="ch-meta">
-                      <span><CircleDollarSign size={12} /> {fmt(m.totalYesPool + m.totalNoPool)} TAC</span>
-                      <span><Users size={12} /> {m.yesBettors + m.noBettors}</span>
+                      <span><CircleDollarSign size={12} /> {fmt(poolVol)} TAC</span>
+                      <span><Users size={12} /> {bettorCount}</span>
                       <button className={`icon-chip ${favoritesSet.has(m.id) ? "on" : ""}`} onClick={e => { e.stopPropagation(); toggleFavorite(m.id); }} title={favoritesSet.has(m.id) ? "Remove from watchlist" : "Add to watchlist"}>
                         <Bookmark size={12} />
                       </button>
@@ -1785,17 +2026,34 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="prob">
-                    <div className="prob-track">
-                      <div className="prob-yes" style={{ width: `${o.y}%` }}><span className="prob-shimmer" /></div>
+                  {(m.outcomeCount || 2) <= 2 ? (
+                    <div className="prob">
+                      <div className="prob-track">
+                        <div className="prob-yes" style={{ width: `${o.y}%` }}><span className="prob-shimmer" /></div>
+                      </div>
+                      <div className="prob-nums">
+                        <span className="py">YES {o.y}%</span>
+                        <span className="pn">NO {o.n}%</span>
+                      </div>
                     </div>
-                    <div className="prob-nums">
-                      <span className="py">YES {o.y}%</span>
-                      <span className="pn">NO {o.n}%</span>
+                  ) : (
+                    <div className="multi-prob">
+                      {(() => {
+                        const pools = m.outcomePools || [];
+                        const pcts = multiOdds(pools);
+                        const labels = m.outcomeLabels || [];
+                        return labels.map((lab, i) => (
+                          <div key={i} className="mp-row">
+                            <span className="mp-lab">{lab}</span>
+                            <div className="mp-track"><div style={{ width: `${pcts[i]}%` }} /></div>
+                            <span className="mp-pct">{pcts[i]}%</span>
+                          </div>
+                        ));
+                      })()}
                     </div>
-                  </div>
+                  )}
 
-                  {open && !isExp && (
+                  {open && !isExp && (m.outcomeCount || 2) <= 2 && (
                     <div className="quick-trade" onClick={e => e.stopPropagation()}>
                       {!account ? (
                         <button className="qt-connect" onClick={connectWallet}>
@@ -1821,19 +2079,62 @@ export default function App() {
                       )}
                     </div>
                   )}
+                  {open && !isExp && (m.outcomeCount || 2) > 2 && (
+                    <div className="quick-trade multi" onClick={e => e.stopPropagation()}>
+                      {!account ? (
+                        <button className="qt-connect" onClick={connectWallet}><Wallet size={15} /> Connect to trade</button>
+                      ) : (
+                        (m.outcomeLabels || []).slice(0, 4).map((lab, i) => (
+                          <button key={i} className="qt-multi" disabled={!!busy[`bet-${m.id}`]} onClick={() => { setExpanded(m.id); betOutcome(m.id, i); tgHaptic("medium"); }}>
+                            {lab}
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  )}
 
                   {isExp && (
                     <div className="card-body">
-                      <ProbChart points={hist} />
+                      {(m.outcomeCount || 2) <= 2 && <ProbChart points={hist} />}
                       {m.description && <p className="desc">{m.description}</p>}
+                      {m.resolutionSource && (
+                        <div className="oracle-pill"><Shield size={12} /> Oracle: <a href={/^https?:\/\//i.test(m.resolutionSource) ? m.resolutionSource : undefined} target="_blank" rel="noreferrer">{m.resolutionSource}</a></div>
+                      )}
                       <div className="facts">
                         <span><Clock size={12} /> Resolves {new Date(m.resolutionTime * 1000).toLocaleString()}</span>
                         <span><Users size={12} /> By {m.creator.slice(0, 6)}…{m.creator.slice(-4)}{isCreator(m) ? " (you)" : ""}</span>
-                        <span><BarChart3 size={12} /> YES {fmt(m.totalYesPool)} ({m.yesBettors}) · NO {fmt(m.totalNoPool)} ({m.noBettors})</span>
+                        {(m.outcomeCount || 2) <= 2 ? (
+                          <span><BarChart3 size={12} /> YES {fmt(m.totalYesPool)} ({m.yesBettors}) · NO {fmt(m.totalNoPool)} ({m.noBettors})</span>
+                        ) : (
+                          <span><BarChart3 size={12} /> {(m.outcomeLabels || []).map((lab, i) => `${lab} ${fmt((m.outcomePools || [])[i] || 0n)}`).join(" · ")}</span>
+                        )}
                         {m.mySide !== SIDE.None && <span><Target size={12} /> Your stake: {fmt(m.myAmount)} TAC{m.status === STATUS.Open && (m.potYes > 0n || m.potNo > 0n) ? ` → ${fmt(m.mySide === SIDE.Yes ? m.potYes : m.potNo)} TAC if ${sideLabel(m.mySide)}` : ""}</span>}
+                        {(m.myOutcomeIndex ?? -1) >= 0 && (m.outcomeCount || 2) > 2 && (
+                          <span><Target size={12} /> Your pick: {(m.outcomeLabels || [])[m.myOutcomeIndex!]} · {fmt(m.myAmount)} TAC</span>
+                        )}
                       </div>
 
-                      {open && account && (
+                      {open && account && (m.outcomeCount || 2) > 2 && (
+                        <div className="trade-panel multi-trade">
+                          <div className="bet-input">
+                            <input type="number" min="0.01" value={betAmt[m.id] || "5"} onChange={e => setBetAmt({ ...betAmt, [m.id]: e.target.value })} />
+                            <div className="quick-sm">{["5", "25", "100"].map(v => <button key={v} onClick={() => setBetAmt({ ...betAmt, [m.id]: v })}>{v}</button>)}</div>
+                          </div>
+                          <div className="multi-bet-grid">
+                            {(m.outcomeLabels || []).map((lab, i) => {
+                              const pcts = multiOdds(m.outcomePools || []);
+                              return (
+                                <button key={i} className={`b-multi ${(multiPick[m.id] ?? m.myOutcomeIndex) === i ? "on" : ""}`} disabled={!!busy[`bet-${m.id}`]} onClick={() => { setMultiPick({ ...multiPick, [m.id]: i }); betOutcome(m.id, i); }}>
+                                  <b>{lab}</b>
+                                  <small>{pcts[i]}% · {fmt((m.outcomePools || [])[i] || 0n)} TAC</small>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {open && account && (m.outcomeCount || 2) <= 2 && (
                         <div className="trade-panel">
                           <div className="trade-tabs">
                             <button className={(tradeMode[m.id] || "buy") === "buy" ? "on buy" : ""} onClick={() => setTradeMode({ ...tradeMode, [m.id]: "buy" })}>Buy</button>
@@ -1903,8 +2204,36 @@ export default function App() {
                         {m.myClaimed && <span className="claimed">✓ Claimed</span>}
                         {ended && !canRexp && <span className="await"><Clock size={13} /> Awaiting resolution…</span>}
                       </div>
+                      <div className="comment-box">
+                        <h4>Discussion</h4>
+                        <div className="comment-list">
+                          {comments.filter(c => c.marketId === m.id).slice(0, 8).map((c, i) => (
+                            <div key={i} className="comment-row">
+                              <span className="c-author">{c.author.slice(0, 6)}…{c.author.slice(-4)}</span>
+                              <span className="c-body">{c.body}</span>
+                            </div>
+                          ))}
+                          {comments.filter(c => c.marketId === m.id).length === 0 && (
+                            <p className="c-empty">No comments yet — leave a note for the crowd.</p>
+                          )}
+                        </div>
+                        <div className="comment-compose">
+                          <input
+                            maxLength={280}
+                            placeholder="Short comment (on-chain event when live)…"
+                            value={commentDraft[m.id] || ""}
+                            onChange={e => setCommentDraft({ ...commentDraft, [m.id]: e.target.value })}
+                            onClick={e => e.stopPropagation()}
+                          />
+                          <button type="button" className="btn-ghost" onClick={e => { e.stopPropagation(); postComment(m.id); }} disabled={!!busy[`comment-${m.id}`]}>
+                            Post
+                          </button>
+                        </div>
+                      </div>
+
                       <div className="transparency">
                         <Shield size={12} /> Pool math on-chain · fee {protocolFee / 10}% · payout = stake + share of losing pool · 3-day dispute window
+                        {m.resolutionSource ? ` · oracle: ${m.resolutionSource}` : ""}
                       </div>
                     </div>
                   )}

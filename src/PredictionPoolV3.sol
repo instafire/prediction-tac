@@ -20,6 +20,11 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
     uint256 public constant MAX_DURATION = 365 days;
     uint256 public constant MAX_QUESTION_LEN = 200;
     uint256 public constant MAX_DESC_LEN = 1000;
+    uint256 public constant MAX_SOURCE_LEN = 300;
+    uint256 public constant MAX_OUTCOMES = 8;
+    uint256 public constant MIN_OUTCOMES = 2;
+    uint256 public constant MAX_COMMENT_LEN = 280;
+    uint256 public constant MAX_OUTCOME_LABEL_LEN = 48;
 
     // ──── State ────
     uint256 public protocolFee = 20;                 // 2% default
@@ -36,6 +41,7 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
         string question;
         string description;
         string category;
+        string resolutionSource;                     // oracle / data source URL or description
         uint64 resolutionTime;
         uint64 createdAt;
         uint64 resolvedAt;
@@ -45,9 +51,15 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
         Side winner;
         uint32 yesBettors;
         uint32 noBettors;
-        mapping(address => Side) side;
+        uint8 outcomeCount;                          // 2 = binary YES/NO; 3–8 = multi-outcome
+        uint8 winnerOutcome;                         // multi: 0-based winner index; binary unused
+        mapping(address => Side) side;               // binary path
         mapping(address => uint256) amounts;
         mapping(address => bool) hasClaimed;
+        mapping(uint8 => uint256) multiPools;        // multi-outcome pools
+        mapping(uint8 => uint32) multiBettors;
+        mapping(uint8 => string) outcomeLabels;
+        mapping(address => uint8) multiSide;         // 0 = none; 1..outcomeCount = outcome index+1
     }
 
     struct UserStats {
@@ -69,14 +81,21 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
     event Deposited(address indexed user, uint256 amount, uint256 newBalance);
     event Withdrawn(address indexed user, uint256 amount, uint256 newBalance);
     event MarketCreated(uint256 indexed marketId, address indexed creator, string question, string category, uint64 resolutionTime, uint256 stake, uint64 timestamp);
+    event MultiMarketCreated(uint256 indexed marketId, address indexed creator, string question, uint8 outcomeCount, uint64 resolutionTime, uint256 stake, uint64 timestamp);
     event BetPlaced(uint256 indexed marketId, address indexed bettor, Side side, uint256 amount, uint64 timestamp);
+    event MultiBetPlaced(uint256 indexed marketId, address indexed bettor, uint8 outcomeIndex, uint256 amount, uint64 timestamp);
     event PositionSold(uint256 indexed marketId, address indexed seller, Side side, uint256 amount, uint256 returned, uint64 timestamp);
+    event MultiPositionSold(uint256 indexed marketId, address indexed seller, uint8 outcomeIndex, uint256 amount, uint256 returned, uint64 timestamp);
     event MarketResolved(uint256 indexed marketId, Side winner, uint256 totalPool, uint64 timestamp);
+    event MultiMarketResolved(uint256 indexed marketId, uint8 winnerOutcome, uint256 totalPool, uint64 timestamp);
     event MarketDisputed(uint256 indexed marketId, address indexed disputer, uint64 timestamp);
     event DisputeResolved(uint256 indexed marketId, Side finalOutcome, uint64 timestamp);
+    event MultiDisputeResolved(uint256 indexed marketId, uint8 finalOutcome, uint64 timestamp);
     event MarketCancelled(uint256 indexed marketId, uint64 timestamp);
     event MarketRefunded(uint256 indexed marketId, uint64 timestamp);
     event Claimed(uint256 indexed marketId, address indexed claimant, uint256 amount, uint64 timestamp);
+    event BatchClaimed(address indexed user, uint256 count, uint256 totalAmount);
+    event CommentPosted(uint256 indexed marketId, address indexed author, string body, uint64 timestamp);
     event FeesWithdrawn(address indexed to, uint256 amount);
     event PausedSet(bool paused);
     event FeeSet(uint256 newFee);
@@ -128,6 +147,94 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
         uint64 resolutionTime,
         uint256 stake
     ) external notPaused nonReentrant returns (uint256) {
+        return _createBinary(question, description, category, "", resolutionTime, stake);
+    }
+
+    /// @notice Binary market with an explicit oracle / resolution source string.
+    function createMarketWithSource(
+        string calldata question,
+        string calldata description,
+        string calldata category,
+        string calldata resolutionSource,
+        uint64 resolutionTime,
+        uint256 stake
+    ) external notPaused nonReentrant returns (uint256) {
+        require(bytes(resolutionSource).length <= MAX_SOURCE_LEN, "Source too long");
+        return _createBinary(question, description, category, resolutionSource, resolutionTime, stake);
+    }
+
+    /// @notice Multi-outcome market (2–8 labels). Creator stake seeds outcome index 0.
+    function createMultiMarket(
+        string calldata question,
+        string calldata description,
+        string calldata category,
+        string calldata resolutionSource,
+        uint64 resolutionTime,
+        uint256 stake,
+        string[] calldata outcomes
+    ) external notPaused nonReentrant returns (uint256) {
+        require(bytes(question).length > 0, "Empty question");
+        require(bytes(question).length <= MAX_QUESTION_LEN, "Question too long");
+        require(bytes(description).length <= MAX_DESC_LEN, "Description too long");
+        require(bytes(resolutionSource).length <= MAX_SOURCE_LEN, "Source too long");
+        require(outcomes.length >= MIN_OUTCOMES && outcomes.length <= MAX_OUTCOMES, "Bad outcome count");
+        require(stake >= MIN_STAKE && stake <= MAX_STAKE, "Stake out of bounds");
+        require(resolutionTime >= block.timestamp + MIN_DURATION, "Duration too short");
+        require(resolutionTime <= block.timestamp + MAX_DURATION, "Duration too long");
+        require(vaultBalance[msg.sender] >= stake, "Insufficient vault balance");
+
+        for (uint256 i = 0; i < outcomes.length; i++) {
+            require(bytes(outcomes[i]).length > 0 && bytes(outcomes[i]).length <= MAX_OUTCOME_LABEL_LEN, "Bad label");
+        }
+
+        vaultBalance[msg.sender] -= stake;
+        totalVaultBalance -= stake;
+
+        uint256 marketId = ++marketCount;
+        Market storage m = markets[marketId];
+        m.creator = msg.sender;
+        m.question = question;
+        m.description = description;
+        m.category = category;
+        m.resolutionSource = resolutionSource;
+        m.resolutionTime = resolutionTime;
+        m.createdAt = uint64(block.timestamp);
+        m.outcomeCount = uint8(outcomes.length);
+
+        for (uint8 i = 0; i < outcomes.length; i++) {
+            m.outcomeLabels[i] = outcomes[i];
+        }
+
+        // Seed first outcome with creator stake (no fee on creation seed)
+        m.multiPools[0] = stake;
+        m.multiBettors[0] = 1;
+        m.multiSide[msg.sender] = 1; // 1-based
+        m.amounts[msg.sender] = stake;
+
+        // Mirror binary pools when exactly 2 outcomes for partial UI compat
+        if (outcomes.length == 2) {
+            m.totalYesPool = stake;
+            m.side[msg.sender] = Side.Yes;
+            m.yesBettors = 1;
+        }
+
+        _trackUserMarket(msg.sender, marketId);
+        userStats[msg.sender].marketsCreated++;
+        userStats[msg.sender].totalStaked += stake;
+
+        emit MultiMarketCreated(marketId, msg.sender, question, m.outcomeCount, resolutionTime, stake, uint64(block.timestamp));
+        emit MarketCreated(marketId, msg.sender, question, category, resolutionTime, stake, uint64(block.timestamp));
+        return marketId;
+    }
+
+    function _createBinary(
+        string memory question,
+        string memory description,
+        string memory category,
+        string memory resolutionSource,
+        uint64 resolutionTime,
+        uint256 stake
+    ) internal returns (uint256) {
         require(bytes(question).length > 0, "Empty question");
         require(bytes(question).length <= MAX_QUESTION_LEN, "Question too long");
         require(bytes(description).length <= MAX_DESC_LEN, "Description too long");
@@ -145,12 +252,20 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
         m.question = question;
         m.description = description;
         m.category = category;
+        m.resolutionSource = resolutionSource;
         m.resolutionTime = resolutionTime;
         m.createdAt = uint64(block.timestamp);
+        m.outcomeCount = 2;
+        m.outcomeLabels[0] = "YES";
+        m.outcomeLabels[1] = "NO";
         m.totalYesPool = stake;
         m.side[msg.sender] = Side.Yes;
         m.amounts[msg.sender] = stake;
         m.yesBettors = 1;
+        // multi mirrors for unified reads
+        m.multiPools[0] = stake;
+        m.multiBettors[0] = 1;
+        m.multiSide[msg.sender] = 1;
 
         _trackUserMarket(msg.sender, marketId);
         userStats[msg.sender].marketsCreated++;
@@ -168,6 +283,7 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
         require(m.creator != address(0), "Market not found");
         require(m.status == Status.Open, "Market not open");
         require(block.timestamp < m.resolutionTime, "Market expired");
+        require(m.outcomeCount <= 2, "Use betOutcome for multi");
         require(stake >= MIN_STAKE && stake <= MAX_STAKE, "Stake out of bounds");
         require(vaultBalance[msg.sender] >= stake, "Insufficient vault balance");
         Side existing = m.side[msg.sender];
@@ -189,11 +305,66 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
         if (side == Side.Yes) m.totalYesPool += net;
         else m.totalNoPool += net;
 
+        // keep multi mirrors in sync for binary
+        uint8 oi = side == Side.Yes ? 0 : 1;
+        m.multiPools[oi] += net;
+        if (existing == Side.None) {
+            m.multiBettors[oi]++;
+            m.multiSide[msg.sender] = oi + 1;
+        }
+
         _trackUserMarket(msg.sender, marketId);
         userStats[msg.sender].betsPlaced++;
         userStats[msg.sender].totalStaked += stake;
 
         emit BetPlaced(marketId, msg.sender, side, net, uint64(block.timestamp));
+    }
+
+    /// @notice Stake on a multi-outcome market (0-based outcome index).
+    function betOutcome(uint256 marketId, uint8 outcomeIndex, uint256 stake) external notPaused nonReentrant {
+        Market storage m = markets[marketId];
+        require(m.creator != address(0), "Market not found");
+        require(m.status == Status.Open, "Market not open");
+        require(block.timestamp < m.resolutionTime, "Market expired");
+        require(m.outcomeCount >= 2, "Not multi");
+        require(outcomeIndex < m.outcomeCount, "Bad outcome");
+        require(stake >= MIN_STAKE && stake <= MAX_STAKE, "Stake out of bounds");
+        require(vaultBalance[msg.sender] >= stake, "Insufficient vault balance");
+
+        uint8 existing = m.multiSide[msg.sender]; // 1-based
+        require(existing == 0 || existing == outcomeIndex + 1, "Already on other outcome");
+
+        vaultBalance[msg.sender] -= stake;
+        totalVaultBalance -= stake;
+
+        uint256 fee = (stake * protocolFee) / BASIS_POINTS;
+        uint256 net = stake - fee;
+        accumulatedFees += fee;
+
+        if (existing == 0) {
+            m.multiSide[msg.sender] = outcomeIndex + 1;
+            m.multiBettors[outcomeIndex]++;
+            if (m.outcomeCount == 2) {
+                m.side[msg.sender] = outcomeIndex == 0 ? Side.Yes : Side.No;
+                if (outcomeIndex == 0) m.yesBettors++;
+                else m.noBettors++;
+            }
+        }
+        m.amounts[msg.sender] += net;
+        m.multiPools[outcomeIndex] += net;
+        if (m.outcomeCount == 2) {
+            if (outcomeIndex == 0) m.totalYesPool += net;
+            else m.totalNoPool += net;
+        }
+
+        _trackUserMarket(msg.sender, marketId);
+        userStats[msg.sender].betsPlaced++;
+        userStats[msg.sender].totalStaked += stake;
+
+        emit MultiBetPlaced(marketId, msg.sender, outcomeIndex, net, uint64(block.timestamp));
+        if (m.outcomeCount == 2) {
+            emit BetPlaced(marketId, msg.sender, outcomeIndex == 0 ? Side.Yes : Side.No, net, uint64(block.timestamp));
+        }
     }
 
     /// @notice Exit part or all of an open position. Returns stake to vault minus protocol fee.
@@ -236,19 +407,39 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
         require(m.status == Status.Open, "Not open");
         require(block.timestamp >= m.resolutionTime, "Resolution time not reached");
         require(outcome == Side.Yes || outcome == Side.No, "Invalid outcome");
+        require(m.outcomeCount <= 2, "Use resolveOutcome for multi");
 
         m.status = Status.Resolved;
         m.winner = outcome;
+        m.winnerOutcome = outcome == Side.Yes ? 0 : 1;
         m.resolvedAt = uint64(block.timestamp);
 
         emit MarketResolved(marketId, outcome, m.totalYesPool + m.totalNoPool, uint64(block.timestamp));
+    }
+
+    function resolveOutcome(uint256 marketId, uint8 winningOutcome) external onlyOwner {
+        Market storage m = markets[marketId];
+        require(m.creator != address(0), "Market not found");
+        require(m.status == Status.Open, "Not open");
+        require(block.timestamp >= m.resolutionTime, "Resolution time not reached");
+        require(m.outcomeCount >= 2, "Bad market");
+        require(winningOutcome < m.outcomeCount, "Bad outcome");
+
+        m.status = Status.Resolved;
+        m.winnerOutcome = winningOutcome;
+        m.resolvedAt = uint64(block.timestamp);
+        if (m.outcomeCount == 2) {
+            m.winner = winningOutcome == 0 ? Side.Yes : Side.No;
+            emit MarketResolved(marketId, m.winner, m.totalYesPool + m.totalNoPool, uint64(block.timestamp));
+        }
+        emit MultiMarketResolved(marketId, winningOutcome, _totalPool(m), uint64(block.timestamp));
     }
 
     function dispute(uint256 marketId) external notPaused {
         Market storage m = markets[marketId];
         require(m.status == Status.Resolved, "Not resolved");
         require(block.timestamp < uint256(m.resolvedAt) + DISPUTE_WINDOW, "Dispute window closed");
-        require(m.side[msg.sender] != Side.None, "Not a participant");
+        require(m.side[msg.sender] != Side.None || m.multiSide[msg.sender] != 0, "Not a participant");
 
         m.status = Status.Disputed;
         emit MarketDisputed(marketId, msg.sender, uint64(block.timestamp));
@@ -258,11 +449,28 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
         Market storage m = markets[marketId];
         require(m.status == Status.Disputed, "Not disputed");
         require(finalOutcome == Side.Yes || finalOutcome == Side.No, "Invalid outcome");
+        require(m.outcomeCount <= 2, "Use resolveMultiDispute");
 
         m.status = Status.Resolved;
         m.winner = finalOutcome;
+        m.winnerOutcome = finalOutcome == Side.Yes ? 0 : 1;
         m.resolvedAt = uint64(block.timestamp);
         emit DisputeResolved(marketId, finalOutcome, uint64(block.timestamp));
+    }
+
+    function resolveMultiDispute(uint256 marketId, uint8 finalOutcome) external onlyOwner {
+        Market storage m = markets[marketId];
+        require(m.status == Status.Disputed, "Not disputed");
+        require(finalOutcome < m.outcomeCount, "Bad outcome");
+
+        m.status = Status.Resolved;
+        m.winnerOutcome = finalOutcome;
+        m.resolvedAt = uint64(block.timestamp);
+        if (m.outcomeCount == 2) {
+            m.winner = finalOutcome == 0 ? Side.Yes : Side.No;
+            emit DisputeResolved(marketId, m.winner, uint64(block.timestamp));
+        }
+        emit MultiDisputeResolved(marketId, finalOutcome, uint64(block.timestamp));
     }
 
     // ════════ CANCEL / REFUND ════════
@@ -289,7 +497,15 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
         require(m.creator != address(0), "Market not found");
         require(m.status == Status.Open, "Not open");
         require(block.timestamp >= m.resolutionTime, "Not expired");
-        require(m.totalYesPool == 0 || m.totalNoPool == 0, "Both sides funded");
+        if (m.outcomeCount <= 2) {
+            require(m.totalYesPool == 0 || m.totalNoPool == 0, "Both sides funded");
+        } else {
+            uint8 funded;
+            for (uint8 i = 0; i < m.outcomeCount; i++) {
+                if (m.multiPools[i] > 0) funded++;
+            }
+            require(funded <= 1, "Multiple outcomes funded");
+        }
 
         m.status = Status.Refunded;
         emit MarketRefunded(marketId, uint64(block.timestamp));
@@ -298,7 +514,7 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
     function claimRefund(uint256 marketId) external nonReentrant {
         Market storage m = markets[marketId];
         require(m.status == Status.Refunded || m.status == Status.Cancelled, "Not refundable");
-        require(m.side[msg.sender] != Side.None, "No position");
+        require(m.side[msg.sender] != Side.None || m.multiSide[msg.sender] != 0, "No position");
         require(!m.hasClaimed[msg.sender], "Already claimed");
 
         m.hasClaimed[msg.sender] = true;
@@ -314,32 +530,89 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
     // ════════ CLAIM WINNINGS ════════
 
     function claim(uint256 marketId) external nonReentrant {
+        uint256 paid = _claimOne(marketId, msg.sender);
+        if (paid > 0) emit Claimed(marketId, msg.sender, paid, uint64(block.timestamp));
+    }
+
+    /// @notice Batch claim resolved / refundable positions. Skips markets that revert conditions.
+    function claimMany(uint256[] calldata marketIds) external nonReentrant {
+        uint256 totalPaid;
+        uint256 count;
+        for (uint256 i = 0; i < marketIds.length; i++) {
+            uint256 id = marketIds[i];
+            Market storage m = markets[id];
+            if (m.creator == address(0) || m.hasClaimed[msg.sender]) continue;
+
+            if (m.status == Status.Resolved) {
+                if (block.timestamp < uint256(m.resolvedAt) + DISPUTE_WINDOW) continue;
+                uint256 paid = _claimOne(id, msg.sender);
+                if (paid > 0) {
+                    totalPaid += paid;
+                    count++;
+                    emit Claimed(id, msg.sender, paid, uint64(block.timestamp));
+                } else if (m.hasClaimed[msg.sender]) {
+                    count++; // recorded loss
+                }
+            } else if (m.status == Status.Refunded || m.status == Status.Cancelled) {
+                if (m.amounts[msg.sender] == 0) continue;
+                if (m.side[msg.sender] == Side.None && m.multiSide[msg.sender] == 0) continue;
+                m.hasClaimed[msg.sender] = true;
+                uint256 amount = m.amounts[msg.sender];
+                vaultBalance[msg.sender] += amount;
+                totalVaultBalance += amount;
+                totalPaid += amount;
+                count++;
+                emit Claimed(id, msg.sender, amount, uint64(block.timestamp));
+            }
+        }
+        emit BatchClaimed(msg.sender, count, totalPaid);
+    }
+
+    function _claimOne(uint256 marketId, address user) internal returns (uint256 share) {
         Market storage m = markets[marketId];
         require(m.status == Status.Resolved, "Not resolved");
         require(block.timestamp >= uint256(m.resolvedAt) + DISPUTE_WINDOW, "Dispute window active");
-        require(!m.hasClaimed[msg.sender], "Already claimed");
-        Side userSide = m.side[msg.sender];
-        require(userSide != Side.None, "No position");
+        require(!m.hasClaimed[user], "Already claimed");
 
-        m.hasClaimed[msg.sender] = true;
-
-        if (userSide != m.winner) {
-            userStats[msg.sender].losses++;
-            return; // loser: nothing to claim, stats updated
+        bool isMulti = m.outcomeCount > 2;
+        if (isMulti) {
+            uint8 userOut = m.multiSide[user];
+            require(userOut != 0, "No position");
+            m.hasClaimed[user] = true;
+            if (userOut - 1 != m.winnerOutcome) {
+                userStats[user].losses++;
+                return 0;
+            }
+            uint256 winnerPool = m.multiPools[m.winnerOutcome];
+            uint256 totalPool = _totalPool(m);
+            require(winnerPool > 0, "Winner pool empty");
+            share = (m.amounts[user] * totalPool) / winnerPool;
+        } else {
+            Side userSide = m.side[user];
+            require(userSide != Side.None, "No position");
+            m.hasClaimed[user] = true;
+            if (userSide != m.winner) {
+                userStats[user].losses++;
+                return 0;
+            }
+            uint256 winnerPool = m.winner == Side.Yes ? m.totalYesPool : m.totalNoPool;
+            uint256 totalPool = m.totalYesPool + m.totalNoPool;
+            require(winnerPool > 0, "Winner pool empty");
+            share = (m.amounts[user] * totalPool) / winnerPool;
         }
 
-        uint256 winnerPool = m.winner == Side.Yes ? m.totalYesPool : m.totalNoPool;
-        uint256 totalPool = m.totalYesPool + m.totalNoPool;
-        require(winnerPool > 0, "Winner pool empty");
-
-        uint256 share = (m.amounts[msg.sender] * totalPool) / winnerPool;
-
-        vaultBalance[msg.sender] += share;
+        vaultBalance[user] += share;
         totalVaultBalance += share;
-        userStats[msg.sender].wins++;
-        userStats[msg.sender].totalWon += share;
+        userStats[user].wins++;
+        userStats[user].totalWon += share;
+    }
 
-        emit Claimed(marketId, msg.sender, share, uint64(block.timestamp));
+    // ════════ COMMENTS (event log — index off-chain) ════════
+
+    function postComment(uint256 marketId, string calldata body) external notPaused {
+        require(markets[marketId].creator != address(0), "Market not found");
+        require(bytes(body).length > 0 && bytes(body).length <= MAX_COMMENT_LEN, "Bad comment");
+        emit CommentPosted(marketId, msg.sender, body, uint64(block.timestamp));
     }
 
     // ════════ VIEWS ════════
@@ -356,6 +629,75 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
         Market storage m = markets[marketId];
         return (m.creator, m.question, m.description, m.category, m.resolutionTime, m.createdAt, m.resolvedAt,
                 m.totalYesPool, m.totalNoPool, m.status, m.winner, m.yesBettors, m.noBettors);
+    }
+
+    function getMarketMeta(uint256 marketId)
+        external view
+        returns (
+            string memory resolutionSource,
+            uint8 outcomeCount,
+            uint8 winnerOutcome
+        )
+    {
+        Market storage m = markets[marketId];
+        return (m.resolutionSource, m.outcomeCount == 0 ? 2 : m.outcomeCount, m.winnerOutcome);
+    }
+
+    function getMultiMarket(uint256 marketId)
+        external view
+        returns (
+            string[] memory labels,
+            uint256[] memory pools,
+            uint32[] memory bettors
+        )
+    {
+        Market storage m = markets[marketId];
+        uint8 n = m.outcomeCount == 0 ? 2 : m.outcomeCount;
+        labels = new string[](n);
+        pools = new uint256[](n);
+        bettors = new uint32[](n);
+        for (uint8 i = 0; i < n; i++) {
+            labels[i] = bytes(m.outcomeLabels[i]).length > 0
+                ? m.outcomeLabels[i]
+                : (i == 0 ? "YES" : (i == 1 ? "NO" : string(abi.encodePacked("O", _u(i)))));
+            if (n == 2 && m.multiPools[0] == 0 && m.multiPools[1] == 0) {
+                pools[i] = i == 0 ? m.totalYesPool : m.totalNoPool;
+                bettors[i] = i == 0 ? m.yesBettors : m.noBettors;
+            } else {
+                pools[i] = m.multiPools[i];
+                bettors[i] = m.multiBettors[i];
+            }
+        }
+    }
+
+    function getUserMultiBet(uint256 marketId, address user)
+        external view
+        returns (uint8 outcomeIndex, uint256 amount, bool claimed)
+    {
+        Market storage m = markets[marketId];
+        uint8 s = m.multiSide[user];
+        outcomeIndex = s == 0 ? type(uint8).max : s - 1;
+        amount = m.amounts[user];
+        claimed = m.hasClaimed[user];
+    }
+
+    /// @notice Paginated market ids (1-based). Returns up to `limit` ids starting at `offset` (0-based into id space).
+    function getMarketsPage(uint256 offset, uint256 limit)
+        external view
+        returns (uint256[] memory ids, uint256 total)
+    {
+        total = marketCount;
+        if (offset >= total || limit == 0) {
+            ids = new uint256[](0);
+            return (ids, total);
+        }
+        uint256 end = offset + limit;
+        if (end > total) end = total;
+        uint256 n = end - offset;
+        ids = new uint256[](n);
+        for (uint256 i = 0; i < n; i++) {
+            ids[i] = offset + i + 1; // market ids are 1-based
+        }
     }
 
     function getUserBet(uint256 marketId, address user)
@@ -437,6 +779,27 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
             inUserMarkets[user][marketId] = true;
             userMarkets[user].push(marketId);
         }
+    }
+
+    function _totalPool(Market storage m) internal view returns (uint256 total) {
+        if (m.outcomeCount <= 2) {
+            return m.totalYesPool + m.totalNoPool;
+        }
+        for (uint8 i = 0; i < m.outcomeCount; i++) {
+            total += m.multiPools[i];
+        }
+    }
+
+    function _u(uint8 v) internal pure returns (string memory) {
+        if (v == 0) return "0";
+        if (v == 1) return "1";
+        if (v == 2) return "2";
+        if (v == 3) return "3";
+        if (v == 4) return "4";
+        if (v == 5) return "5";
+        if (v == 6) return "6";
+        if (v == 7) return "7";
+        return "8";
     }
 
     receive() external payable notPaused {
