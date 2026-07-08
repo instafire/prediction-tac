@@ -5,10 +5,16 @@ import {
   ChevronDown, Sparkles, Target, Award, Crown, Medal, Star, Activity,
   ArrowUpRight, ArrowDownRight, RefreshCw, Plus, Pause, Play, Landmark,
   CircleDollarSign, Users, Eye, Scale, PartyPopper, Gauge, X,
-  Search, ArrowUpDown, Bookmark, Link2, Palette, Home, User
+  Search, ArrowUpDown, Bookmark, Link2, Palette, Home, User, Settings,
+  Calculator, HelpCircle, Bell, Download, Share2, WifiOff, History,
+  Volume2, Vibrate, Moon
 } from "lucide-react";
 import abi from "./abi.json";
 import "./App.css";
+import { BrandMark, CatArt, EmptyMarketsArt, EmptyVaultArt, HeroChartArt, LoadingSkeleton } from "./graphics";
+import { loadPrefs, savePrefs, type Prefs } from "./lib/prefs";
+import { playSound } from "./lib/sounds";
+import { loadJournal, pushJournal, clearJournal, type TxEntry } from "./lib/txJournal";
 
 // ─── Runtime config (admin-settable, overrides build-time env) ───
 interface RuntimeConfig { contract?: string; rpc?: string; chain?: "mainnet" | "testnet" }
@@ -34,7 +40,16 @@ const NOT_DEPLOYED = CONTRACT_ADDRESS === ZERO_ADDR;
 
 const CATEGORIES = ["crypto", "politics", "sports", "tech", "culture", "misc"] as const;
 const CAT_ICONS: Record<string, string> = { crypto: "₿", politics: "🏛", sports: "⚽", tech: "🚀", culture: "🎬", misc: "🎲" };
+const CAT_LABEL: Record<string, string> = { crypto: "Crypto", politics: "Politics", sports: "Sports", tech: "Tech", culture: "Culture", misc: "Misc" };
 const DURATIONS: Record<string, number> = { "1 day": 1, "3 days": 3, "7 days": 7, "14 days": 14, "30 days": 30, "90 days": 90 };
+const FAQ_ITEMS: { q: string; a: string }[] = [
+  { q: "How do payouts work?", a: "Pari-mutuel pools: winners split the losing side pro-rata after a protocol fee on profit. Your stake returns plus your share of the other side." },
+  { q: "What is the vault?", a: "Deposit TAC once into the on-chain vault. Bets pull from your vault balance so you skip per-trade wallet confirms for every click." },
+  { q: "Can I exit early?", a: "Yes. Sell returns face-value stake (minus fee) to your vault and removes liquidity from that side. Odds shift when you exit." },
+  { q: "How is resolution fair?", a: "Owner resolves after deadline. Bettors get a 3-day dispute window. One-sided expired markets can be refunded by anyone." },
+  { q: "Is this a Telegram Mini App?", a: "Yes. Open it inside Telegram for haptics, full-screen, and share flows. Desktop wallets work the same via MetaMask-compatible providers." },
+  { q: "Demo mode?", a: "If no contract address is set, you trade a simulated wallet with seeded markets. Flip to live from Admin → Launch Setup." },
+];
 
 const STATUS = { Open: 0, Resolved: 1, Disputed: 2, Cancelled: 3, Refunded: 4 } as const;
 const SIDE = { None: 0, Yes: 1, No: 2 } as const;
@@ -120,12 +135,27 @@ function saveBonusXp(v: number) { try { localStorage.setItem("ptac-bonusxp", Str
 
 const TG = typeof window !== "undefined" ? window.Telegram?.WebApp : undefined;
 const IN_TELEGRAM = !!TG?.initData || !!TG?.platform && TG.platform !== "unknown";
+let prefsHaptics = true;
 function tgHaptic(type: "light" | "medium" | "success" | "error" = "light") {
   try {
-    if (!TG?.HapticFeedback) return;
+    if (!prefsHaptics || !TG?.HapticFeedback) return;
     if (type === "success" || type === "error") TG.HapticFeedback.notificationOccurred(type);
     else TG.HapticFeedback.impactOccurred(type);
   } catch { /* noop */ }
+}
+
+function exportPositionsCsv(rows: { question: string; side: string; amount: string; status: string; pnl?: string }[]) {
+  const header = "question,side,amount_tac,status,note\n";
+  const body = rows.map(r =>
+    `"${r.question.replace(/"/g, '""')}",${r.side},${r.amount},${r.status},"${(r.pnl || "").replace(/"/g, '""')}"`
+  ).join("\n");
+  const blob = new Blob([header + body], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `prediction-tac-positions-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 // ─── Demo mode data (shown until the contract is deployed) ───
@@ -481,9 +511,22 @@ export default function App() {
   const [priceHistory, setPriceHistory] = useState<Record<number, PricePoint[]>>({});
   const [leaders, setLeaders] = useState<Leader[]>([]);
   const [loading, setLoading] = useState(false);
-  const [view, setView] = useState<"home" | "markets" | "vault" | "portfolio" | "leaderboard" | "admin">("home");
+  const [view, setView] = useState<"home" | "markets" | "vault" | "portfolio" | "leaderboard" | "admin" | "settings" | "tools">("home");
   const [theme, setTheme] = useState<string>(() => {
     try { return localStorage.getItem("ptac-theme") || "midnight"; } catch { return "midnight"; }
+  });
+  const [prefs, setPrefs] = useState<Prefs>(() => loadPrefs());
+  const [journal, setJournal] = useState<TxEntry[]>(() => loadJournal());
+  const [showOnboarding, setShowOnboarding] = useState(() => !loadPrefs().onboardingDone);
+  const [onboardStep, setOnboardStep] = useState(0);
+  const [calcOpen, setCalcOpen] = useState(false);
+  const [calcYes, setCalcYes] = useState("50");
+  const [calcStake, setCalcStake] = useState("100");
+  const [calcFee, setCalcFee] = useState("2");
+  const [faqOpen, setFaqOpen] = useState<number | null>(0);
+  const [online, setOnline] = useState(typeof navigator !== "undefined" ? navigator.onLine : true);
+  const [alertedIds, setAlertedIds] = useState<Set<number>>(() => {
+    try { return new Set(JSON.parse(localStorage.getItem("ptac-alerted") || "[]")); } catch { return new Set(); }
   });
   const [tab, setTab] = useState<"all" | "open" | "ending" | "resolved" | "mine">("all");
   const [catFilter, setCatFilter] = useState("");
@@ -531,14 +574,22 @@ export default function App() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
+    document.documentElement.dataset.motion = prefs.reduceMotion ? "reduce" : "full";
     try { localStorage.setItem("ptac-theme", theme); } catch {}
-  }, [theme]);
+    prefsHaptics = prefs.haptics;
+  }, [theme, prefs.reduceMotion, prefs.haptics]);
   const THEMES = useMemo(() => ["midnight", "terminal", "degen", "ledger"] as const, []);
   const THEME_LABEL: Record<string, string> = { midnight: "Midnight", terminal: "Terminal", degen: "Degen", ledger: "Ledger" };
   function cycleTheme() {
     const i = THEMES.indexOf(theme as typeof THEMES[number]);
     const next = THEMES[(i + 1) % THEMES.length];
     setTheme(next);
+    playSound("tap", prefs.sounds);
+  }
+  function updatePrefs(partial: Partial<Prefs>) {
+    const next = savePrefs(partial);
+    setPrefs(next);
+    prefsHaptics = next.haptics;
   }
 
   useEffect(() => {
@@ -568,22 +619,101 @@ export default function App() {
     try {
       TG.ready();
       TG.expand?.();
-      TG.setHeaderColor?.("#0a0e1a");
-      TG.setBackgroundColor?.("#0a0e1a");
+      TG.setHeaderColor?.("#0b1110");
+      TG.setBackgroundColor?.("#0b1110");
       TG.disableVerticalSwipes?.();
     } catch { /* noop */ }
   }, []);
 
+  useEffect(() => {
+    const on = () => setOnline(true);
+    const off = () => setOnline(false);
+    window.addEventListener("online", on);
+    window.addEventListener("offline", off);
+    return () => {
+      window.removeEventListener("online", on);
+      window.removeEventListener("offline", off);
+    };
+  }, []);
+
+  // Telegram BackButton when not on home
+  useEffect(() => {
+    if (!TG?.BackButton) return;
+    try {
+      if (view !== "home") {
+        TG.BackButton.show();
+        const handler = () => { setView("home"); tgHaptic("light"); };
+        TG.BackButton.onClick?.(handler);
+        return () => {
+          TG.BackButton.offClick?.(handler);
+          TG.BackButton.hide();
+        };
+      }
+      TG.BackButton.hide();
+    } catch { /* noop */ }
+  }, [view]);
+
   function notify(m: string, isErr = false) {
     if (isErr) { setErr(m); setToast("") } else { setToast(m); setErr("") }
     tgHaptic(isErr ? "error" : "light");
+    playSound(isErr ? "error" : "tap", prefs.sounds);
     setTimeout(() => { setToast(""); setErr("") }, 4000);
   }
-  function fireConfetti() { setSuccessAnimation("ripple"); tgHaptic("success"); setTimeout(() => setSuccessAnimation(null), 2000) }
+  function fireConfetti() {
+    setSuccessAnimation("ripple");
+    tgHaptic("success");
+    playSound("success", prefs.sounds);
+    setTimeout(() => setSuccessAnimation(null), 2000);
+  }
 
-  function showMoneyRain() { setSuccessAnimation("money"); tgHaptic("success"); setTimeout(() => setSuccessAnimation(null), 2000) }
+  function showMoneyRain() {
+    setSuccessAnimation("money");
+    tgHaptic("success");
+    playSound("win", prefs.sounds);
+    setTimeout(() => setSuccessAnimation(null), 2000);
+  }
 
-  function showConnectionPulse() { setSuccessAnimation("connection"); tgHaptic("success"); setTimeout(() => setSuccessAnimation(null), 1500) }
+  function showConnectionPulse() {
+    setSuccessAnimation("connection");
+    tgHaptic("success");
+    playSound("success", prefs.sounds);
+    setTimeout(() => setSuccessAnimation(null), 1500);
+  }
+
+  function logTx(kind: string, label: string, ok = true, detail?: string) {
+    setJournal(pushJournal({ kind, label, ok, detail }));
+  }
+
+  async function shareMarket(m: Market) {
+    const o = odds(m.totalYesPool, m.totalNoPool);
+    const url = `${window.location.origin}${window.location.pathname}#mk-${m.id}`;
+    const text = `${m.question}\nYES ${o.y}% · NO ${o.n}% · ${fmt(m.totalYesPool + m.totalNoPool)} TAC pool\n${url}`;
+    try {
+      if (TG?.openTelegramLink) {
+        const share = `https://t.me/share/url?url=${encodeURIComponent(url)}&text=${encodeURIComponent(`${m.question} — YES ${o.y}%`)}`;
+        TG.openTelegramLink(share);
+        questBump("signal");
+        notify("Opening Telegram share…");
+        return;
+      }
+      if (navigator.share) {
+        await navigator.share({ title: "Prediction Tac", text, url });
+        questBump("signal");
+        notify("Shared");
+        return;
+      }
+      await navigator.clipboard.writeText(text);
+      questBump("signal");
+      notify("Share text copied");
+    } catch {
+      try {
+        await navigator.clipboard.writeText(url);
+        notify("Link copied");
+      } catch {
+        notify("Share failed", true);
+      }
+    }
+  }
 
   useEffect(() => {
     const s = bumpStreak();
@@ -867,6 +997,8 @@ export default function App() {
       await new Promise(r => setTimeout(r, 650));
       setBusy(b => ({ ...b, [key]: false }));
       notify(`${okMsg} (demo — no real transaction)`);
+      logTx(key, okMsg, true, "demo");
+      playSound(celebrate ? "win" : "bet", prefs.sounds);
       if (celebrate) fireConfetti();
       return;
     }
@@ -876,10 +1008,14 @@ export default function App() {
       notify("Transaction sent — confirming…");
       await r.wait();
       notify(okMsg);
+      logTx(key, okMsg, true);
+      playSound(celebrate ? "win" : "bet", prefs.sounds);
       if (celebrate) fireConfetti();
       await loadAll();
     } catch (e: any) {
-      notify(e?.shortMessage || e?.reason || e?.message || "Transaction failed", true);
+      const msg = e?.shortMessage || e?.reason || e?.message || "Transaction failed";
+      notify(msg, true);
+      logTx(key, msg, false);
     } finally { setBusy(b => ({ ...b, [key]: false })) }
   }
 
@@ -1071,6 +1207,9 @@ export default function App() {
       { id: "v-portfolio", icon: <Target size={15} />, label: "Go to Portfolio", hint: "view", run: () => setView("portfolio") },
       { id: "v-leaders", icon: <Trophy size={15} />, label: "Go to Leaderboard", hint: "view", run: () => setView("leaderboard") },
       { id: "a-create", icon: <Plus size={15} />, label: "Create a market", hint: "action", run: () => { setView("markets"); setShowCreate(true) } },
+      { id: "a-calc", icon: <Calculator size={15} />, label: "Odds calculator", hint: "tool", run: () => setCalcOpen(true) },
+      { id: "a-settings", icon: <Settings size={15} />, label: "Open Settings", hint: "view", run: () => setView("settings") },
+      { id: "a-claim", icon: <PartyPopper size={15} />, label: "Claim all winnings", hint: "action", run: () => { setView("portfolio"); claimAll() } },
       { id: "a-theme", icon: <Palette size={15} />, label: `Switch theme (now: ${THEME_LABEL[theme] || theme})`, hint: "action", run: cycleTheme },
       { id: "a-refresh", icon: <RefreshCw size={15} />, label: "Refresh data", hint: "action", run: loadAll },
     ];
@@ -1123,9 +1262,67 @@ export default function App() {
   const disputedMarkets = markets.filter(m => m.status === STATUS.Disputed);
   const awaitingResolution = markets.filter(m => m.status === STATUS.Open && now >= m.resolutionTime && m.totalYesPool > 0n && m.totalNoPool > 0n);
   const isCreator = (m: Market) => account && m.creator.toLowerCase() === account.toLowerCase();
+  const claimable = markets.filter(m =>
+    (m.status === STATUS.Resolved && !m.myClaimed && m.mySide === m.winner && m.mySide !== SIDE.None) ||
+    ((m.status === STATUS.Refunded || m.status === STATUS.Cancelled) && !m.myClaimed && m.mySide !== SIDE.None)
+  );
+
+  // Ending-soon local alerts
+  useEffect(() => {
+    if (!prefs.endingAlerts || markets.length === 0) return;
+    const thr = prefs.alertThresholdHrs * 3600;
+    const due = markets.filter(m =>
+      m.status === STATUS.Open &&
+      m.resolutionTime > now &&
+      m.resolutionTime - now <= thr &&
+      !alertedIds.has(m.id)
+    );
+    if (due.length === 0) return;
+    const next = new Set(alertedIds);
+    for (const m of due.slice(0, 3)) {
+      next.add(m.id);
+      notify(`Ending soon: ${m.question.slice(0, 64)}${m.question.length > 64 ? "…" : ""}`);
+      if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+        try { new Notification("Prediction Tac", { body: m.question, icon: "/icon-192.png" }); } catch { /* noop */ }
+      }
+    }
+    setAlertedIds(next);
+    try { localStorage.setItem("ptac-alerted", JSON.stringify([...next])); } catch { /* noop */ }
+  }, [markets, now, prefs.endingAlerts, prefs.alertThresholdHrs]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const calcPayout = useMemo(() => {
+    const yesPct = Math.min(99.9, Math.max(0.1, parseFloat(calcYes) || 50));
+    const stakeN = Math.max(0, parseFloat(calcStake) || 0);
+    const feePct = Math.min(5, Math.max(0, parseFloat(calcFee) || 0));
+    if (stakeN <= 0) return { yes: 0, no: 0, yesMult: 0, noMult: 0 };
+    // Simple implied payout if current odds held and you took that side alone of the winning pool share approximation
+    const yesMult = (100 / yesPct) * (1 - feePct / 100 * (1 - yesPct / 100));
+    const noMult = (100 / (100 - yesPct)) * (1 - feePct / 100 * (yesPct / 100));
+    return {
+      yes: stakeN * yesMult,
+      no: stakeN * noMult,
+      yesMult,
+      noMult,
+    };
+  }, [calcYes, calcStake, calcFee]);
+
+  async function claimAll() {
+    if (!account || claimable.length === 0) return notify("Nothing to claim", true);
+    for (const m of claimable) {
+      if (m.status === STATUS.Resolved) await claim(m.id);
+      else await claimRefund(m.id);
+    }
+  }
+
+  function finishOnboarding() {
+    updatePrefs({ onboardingDone: true });
+    setShowOnboarding(false);
+    playSound("success", prefs.sounds);
+    setView("markets");
+  }
 
   return (
-    <div className={`app-root ${IN_TELEGRAM ? "tg-mode" : ""}`}>
+    <div className={`app-root ${IN_TELEGRAM ? "tg-mode" : ""} ${prefs.reduceMotion ? "reduce-motion" : ""}`}>
       <div className="bg-scene">
         <div className="orb o1" /><div className="orb o2" /><div className="orb o3" />
         <div className="grid-overlay" />
@@ -1185,14 +1382,79 @@ export default function App() {
       )}
       {paused && <div className="banner warn"><Pause size={14} /> Protocol paused — actions disabled</div>}
       {!solvent && account && <div className="banner danger"><Shield size={14} /> Solvency warning — contract balance below obligations</div>}
+      {!online && <div className="banner danger"><WifiOff size={14} /> You're offline — balances may be stale</div>}
+
+      {showOnboarding && (
+        <div className="onboard-overlay" role="dialog" aria-modal="true" aria-label="Welcome">
+          <div className="onboard-card">
+            <div className="onboard-art">
+              {onboardStep === 0 && <HeroChartArt className="onboard-hero" />}
+              {onboardStep === 1 && <EmptyVaultArt />}
+              {onboardStep === 2 && <EmptyMarketsArt />}
+            </div>
+            {onboardStep === 0 && (
+              <>
+                <h2>Call it. Stake it. Win.</h2>
+                <p>Peer-to-peer YES/NO pools on TAC. Odds move with every stake — early conviction pays more.</p>
+              </>
+            )}
+            {onboardStep === 1 && (
+              <>
+                <h2>Vault first</h2>
+                <p>Deposit TAC once. Trade from your vault balance without signing every single bet. Withdraw anytime.</p>
+              </>
+            )}
+            {onboardStep === 2 && (
+              <>
+                <h2>Built for Telegram</h2>
+                <p>Thumb-friendly markets, haptics, and share links. Rank up with XP, streaks, and the leaderboard.</p>
+              </>
+            )}
+            <div className="onboard-dots">
+              {[0, 1, 2].map(i => <span key={i} className={i === onboardStep ? "on" : ""} />)}
+            </div>
+            <div className="onboard-actions">
+              {onboardStep < 2 ? (
+                <button className="btn-submit" onClick={() => { setOnboardStep(s => s + 1); playSound("tap", prefs.sounds); }}>Continue</button>
+              ) : (
+                <button className="btn-submit" onClick={finishOnboarding}>Open markets</button>
+              )}
+              <button className="btn-ghost" onClick={finishOnboarding}>Skip</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {calcOpen && (
+        <div className="palette-overlay" onClick={() => setCalcOpen(false)}>
+          <div className="calc-panel" onClick={e => e.stopPropagation()}>
+            <div className="calc-head">
+              <h3><Calculator size={16} /> Odds calculator</h3>
+              <button className="icon-chip" onClick={() => setCalcOpen(false)} aria-label="Close"><X size={14} /></button>
+            </div>
+            <p className="sub">Estimate payout if current odds held and you won. Fee applies to profit only in the real pool math.</p>
+            <div className="calc-grid">
+              <label>YES odds %
+                <input type="number" min="1" max="99" value={calcYes} onChange={e => setCalcYes(e.target.value)} />
+              </label>
+              <label>Stake (TAC)
+                <input type="number" min="0" value={calcStake} onChange={e => setCalcStake(e.target.value)} />
+              </label>
+              <label>Fee %
+                <input type="number" min="0" max="5" step="0.1" value={calcFee} onChange={e => setCalcFee(e.target.value)} />
+              </label>
+            </div>
+            <div className="calc-out">
+              <div className="calc-yes"><span>If YES wins</span><b>{calcPayout.yes.toFixed(2)} TAC</b><small>{calcPayout.yesMult.toFixed(2)}x</small></div>
+              <div className="calc-no"><span>If NO wins</span><b>{calcPayout.no.toFixed(2)} TAC</b><small>{calcPayout.noMult.toFixed(2)}x</small></div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <nav className="topnav">
         <div className="brand" onClick={() => setView("home")}>
-          <svg className="brand-logo" viewBox="0 0 32 32" width="30" height="30" aria-hidden>
-            <defs><linearGradient id="bl" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stopColor="#2ee6a8" /><stop offset="1" stopColor="#22d38a" /></linearGradient></defs>
-            <rect width="32" height="32" rx="9" fill="rgba(46,230,168,.14)" />
-            <path d="M8 22 L14 12 L19 17 L24 8" stroke="url(#bl)" strokeWidth="3" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
+          <BrandMark size={30} />
           <span className="brand-name">Prediction<b>Tac</b></span>
         </div>
         <div className="nav-tabs">
@@ -1206,6 +1468,12 @@ export default function App() {
         <div className="nav-right">
           <button className="palette-btn" onClick={() => setPaletteOpen(true)} title="Command palette (⌘K or /)">
             <Search size={14} /><kbd>⌘K</kbd>
+          </button>
+          <button className="theme-btn" onClick={() => setCalcOpen(true)} title="Odds calculator">
+            <Calculator size={15} />
+          </button>
+          <button className="theme-btn" onClick={() => setView("settings")} title="Settings">
+            <Settings size={15} />
           </button>
           <button className="theme-btn" onClick={cycleTheme} title={`Theme: ${THEME_LABEL[theme] || theme} — click to switch`}>
             <Palette size={15} />
@@ -1255,6 +1523,9 @@ export default function App() {
                 <div className="hero-badge"><span className="pulse-dot" /><Sparkles size={13} /> Live on TAC · Telegram ready</div>
                 <h1>Call it. <span className="grad">Stake it.</span> Win the pool.</h1>
                 <p>Peer-to-peer prediction markets for the TON / TAC stack. Stake YES or NO, climb ranks, cash out winners. No house edge — just the pool.</p>
+                <div className="hero-visual desktop-only" aria-hidden>
+                  <HeroChartArt className="hero-chart-art" />
+                </div>
                 <div className="hero-stats">
                   <div className="stat"><CircleDollarSign className="stat-ico" size={18} /><span className="v"><CountUp value={parseFloat(ethers.formatEther(totalVol))} /> TAC</span><span className="l">Volume</span></div>
                   <div className="stat"><Activity className="stat-ico" size={18} /><span className="v"><CountUp value={activeCount} dp={0} /></span><span className="l">Live Markets</span></div>
@@ -1269,6 +1540,9 @@ export default function App() {
                 </div>
               </div>
               <aside className="hero-side">
+                <div className="hero-visual mobile-only" aria-hidden>
+                  <HeroChartArt className="hero-chart-art" />
+                </div>
                 <div className="hero-panel hero-spotlight">
                   <div className="panel-head">
                     <span className="panel-kicker">Spotlight</span>
@@ -1276,6 +1550,7 @@ export default function App() {
                   </div>
                   {spotlightMarket ? (
                     <>
+                      <div className="spotlight-cat"><CatArt cat={spotlightMarket.category} size={22} /> <span>{CAT_LABEL[spotlightMarket.category] || spotlightMarket.category}</span></div>
                       <h3>{spotlightMarket.question}</h3>
                       <p>{spotlightMarket.description || "Live market with the deepest pool and strongest signal."}</p>
                       <div className="panel-meta">
@@ -1354,6 +1629,23 @@ export default function App() {
             <p>Browse live pools, stake your conviction, and climb the leaderboard.</p>
             <button className="btn-create big" onClick={() => setView("markets")}><BarChart3 size={16} /> Open the Markets</button>
           </section>
+
+          <section className="faq-section">
+            <h3><HelpCircle size={16} /> FAQ</h3>
+            <div className="faq-list">
+              {FAQ_ITEMS.map((item, i) => (
+                <button
+                  key={item.q}
+                  type="button"
+                  className={`faq-item ${faqOpen === i ? "open" : ""}`}
+                  onClick={() => setFaqOpen(faqOpen === i ? null : i)}
+                >
+                  <span className="faq-q">{item.q}<ChevronDown size={15} className={faqOpen === i ? "rot" : ""} /></span>
+                  {faqOpen === i && <span className="faq-a">{item.a}</span>}
+                </button>
+              ))}
+            </div>
+          </section>
         </>
       )}
 
@@ -1366,14 +1658,14 @@ export default function App() {
 
           <div className="cat-browse">
             <button className={`catb ${catFilter === "" ? "on" : ""}`} onClick={() => setCatFilter("")}>
-              <span className="cb-ico">🌐</span> All
+              <span className="cb-art"><CatArt cat="misc" size={20} /></span> All
               <span className="cb-n">{markets.length}</span>
             </button>
             {CATEGORIES.map(c => {
               const n = markets.filter(m => m.category === c).length;
               return (
                 <button key={c} className={`catb ${catFilter === c ? "on" : ""}`} onClick={() => setCatFilter(catFilter === c ? "" : c)}>
-                  <span className="cb-ico">{CAT_ICONS[c]}</span> {c[0].toUpperCase() + c.slice(1)}
+                  <span className="cb-art"><CatArt cat={c} size={20} /></span> {CAT_LABEL[c] || c}
                   <span className="cb-n">{n}</span>
                 </button>
               );
@@ -1432,7 +1724,15 @@ export default function App() {
           )}
 
           <main className="grid">
-            {filtered.length === 0 && !loading && <div className="empty"><Gauge size={22} />No markets here yet.</div>}
+            {loading && filtered.length === 0 && <LoadingSkeleton rows={4} />}
+            {filtered.length === 0 && !loading && (
+              <div className="empty rich">
+                <EmptyMarketsArt />
+                <b>No markets match</b>
+                <span>Try another category, clear search, or create the first market.</span>
+                <button className="btn-create" onClick={() => setShowCreate(true)}><Plus size={15} /> Create market</button>
+              </div>
+            )}
             {filtered.map((m, idx) => {
               const o = odds(m.totalYesPool, m.totalNoPool);
               const isExp = expanded === m.id;
@@ -1450,7 +1750,7 @@ export default function App() {
                 <div key={m.id} id={`mk-${m.id}`} className={`card ${!open ? "done" : ""} ${isExp ? "exp" : ""} ${urgent ? "hot" : ""}`} style={{ "--d": `${Math.min(idx, 8) * 55}ms` } as any}>
                   <div className="card-head" onClick={() => { setExpanded(isExp ? null : m.id); if (!isExp) questBump("scout"); }}>
                     <div className="ch-left">
-                      <span className="cat-chip">{CAT_ICONS[m.category] || "🎲"} {m.category}</span>
+                      <span className="cat-chip art"><CatArt cat={m.category} size={16} /> {CAT_LABEL[m.category] || m.category}</span>
                       {favoritesSet.has(m.id) && <span className="fav-chip"><Bookmark size={11} /> watched</span>}
                       {urgent && <span className="urgent-chip"><Flame size={11} /> ending soon</span>}
                       {m.status === STATUS.Resolved && <span className={`res-chip ${m.winner === SIDE.Yes ? "y" : "n"}`}>{m.winner === SIDE.Yes ? "YES ✓" : "NO ✗"}</span>}
@@ -1476,6 +1776,9 @@ export default function App() {
                       </button>
                       <button className="icon-chip" onClick={e => { e.stopPropagation(); copyMarketLink(m.id); }} title="Copy share link">
                         <Link2 size={12} />
+                      </button>
+                      <button className="icon-chip" onClick={e => { e.stopPropagation(); shareMarket(m); }} title="Share">
+                        <Share2 size={12} />
                       </button>
                       <span className={urgent ? "urgent-t" : ""}><Clock size={12} /> {timeLeft(m.resolutionTime, now, m.status)}</span>
                       <ChevronDown size={15} className={`chev ${isExp ? "rot" : ""}`} />
@@ -1631,6 +1934,13 @@ export default function App() {
         <section className="vault-page">
           <h2><Landmark size={22} /> Your Vault</h2>
           <p className="sub">Deposit once — create and bet instantly. Withdraw anytime, no lockups.</p>
+          {!account && (
+            <div className="empty rich" style={{ marginBottom: 16 }}>
+              <EmptyVaultArt />
+              <b>Connect to fund your vault</b>
+              <span>Your TAC lives on-chain under your address. Bets pull from vault balance.</span>
+            </div>
+          )}
           <div className="vault-card">
             <div className="vault-balance">
               <span className="vb-label">Vault balance</span>
@@ -1665,7 +1975,31 @@ export default function App() {
 
       {view === "portfolio" && (
         <section className="portfolio">
-          <h2><Target size={22} /> Portfolio</h2>
+          <div className="page-head row-between">
+            <div>
+              <h2><User size={22} /> Portfolio</h2>
+              <p className="sub">Positions, quests, achievements, and your local action journal.</p>
+            </div>
+            <div className="head-actions">
+              {claimable.length > 0 && (
+                <button className="btn-submit" onClick={claimAll} disabled={Object.keys(busy).some(k => k.startsWith("claim") || k.startsWith("refund"))}>
+                  <PartyPopper size={15} /> Claim all ({claimable.length})
+                </button>
+              )}
+              <button className="btn-ghost" onClick={() => {
+                const rows = markets.filter(m => m.mySide !== SIDE.None).map(m => ({
+                  question: m.question,
+                  side: sideLabel(m.mySide),
+                  amount: fmt(m.myAmount),
+                  status: statusLabel(m.status),
+                  pnl: m.status === STATUS.Resolved ? (m.mySide === m.winner ? "won" : "lost") : "open",
+                }));
+                if (!rows.length) return notify("No positions to export", true);
+                exportPositionsCsv(rows);
+                notify("CSV downloaded");
+              }}><Download size={14} /> Export</button>
+            </div>
+          </div>
           <div className="quest-panel">
             <div className="qp-head">
               <h3><Zap size={17} /> Daily Quests <span className="qp-day">resets midnight</span></h3>
@@ -1746,10 +2080,109 @@ export default function App() {
                     </div>
                   );
                 })}
-                {markets.filter(m => m.mySide !== SIDE.None).length === 0 && <div className="empty">No positions yet — go bet on something.</div>}
+                {markets.filter(m => m.mySide !== SIDE.None).length === 0 && (
+                  <div className="empty rich">
+                    <EmptyMarketsArt />
+                    <b>No positions yet</b>
+                    <span>Pick a market and stake your conviction.</span>
+                    <button className="btn-create" onClick={() => setView("markets")}>Browse markets</button>
+                  </div>
+                )}
               </div>
+
+              <div className="port-tools">
+                <button className="btn-ghost" onClick={() => setView("settings")}><Settings size={14} /> Settings</button>
+                <button className="btn-ghost" onClick={() => setCalcOpen(true)}><Calculator size={14} /> Calculator</button>
+              </div>
+
+              <h3><History size={17} /> Action journal</h3>
+              <p className="sub tight">Local log of your deposits, bets, claims, and fails on this device.</p>
+              <div className="journal-list">
+                {journal.length === 0 && <div className="empty">No actions logged yet.</div>}
+                {journal.slice(0, 24).map(j => (
+                  <div key={j.id} className={`journal-row ${j.ok ? "ok" : "bad"}`}>
+                    <span className="j-kind">{j.kind}</span>
+                    <span className="j-label">{j.label}</span>
+                    <span className="j-time">{new Date(j.t * 1000).toLocaleString()}</span>
+                  </div>
+                ))}
+              </div>
+              {journal.length > 0 && (
+                <button className="btn-ghost" style={{ marginTop: 10 }} onClick={() => { clearJournal(); setJournal([]); notify("Journal cleared"); }}>
+                  Clear journal
+                </button>
+              )}
             </>
           )}
+        </section>
+      )}
+
+      {view === "settings" && (
+        <section className="settings-page">
+          <div className="page-head">
+            <h2><Settings size={22} /> Settings</h2>
+            <p className="sub">Tune haptics, sounds, alerts, and appearance for Telegram and desktop.</p>
+          </div>
+          <div className="settings-grid">
+            <div className="set-card">
+              <h4><Vibrate size={15} /> Feedback</h4>
+              <label className="set-row">
+                <span>Telegram haptics</span>
+                <input type="checkbox" checked={prefs.haptics} onChange={e => updatePrefs({ haptics: e.target.checked })} />
+              </label>
+              <label className="set-row">
+                <span><Volume2 size={14} /> UI sounds</span>
+                <input type="checkbox" checked={prefs.sounds} onChange={e => { updatePrefs({ sounds: e.target.checked }); if (e.target.checked) playSound("tap", true); }} />
+              </label>
+              <label className="set-row">
+                <span><Moon size={14} /> Reduce motion</span>
+                <input type="checkbox" checked={prefs.reduceMotion} onChange={e => updatePrefs({ reduceMotion: e.target.checked })} />
+              </label>
+            </div>
+            <div className="set-card">
+              <h4><Bell size={15} /> Alerts</h4>
+              <label className="set-row">
+                <span>Ending-soon toasts</span>
+                <input type="checkbox" checked={prefs.endingAlerts} onChange={async e => {
+                  const on = e.target.checked;
+                  if (on && typeof Notification !== "undefined" && Notification.permission === "default") {
+                    try { await Notification.requestPermission(); } catch { /* noop */ }
+                  }
+                  updatePrefs({ endingAlerts: on });
+                }} />
+              </label>
+              <label className="set-row col">
+                <span>Alert window (hours)</span>
+                <input type="number" min="1" max="168" value={prefs.alertThresholdHrs} onChange={e => updatePrefs({ alertThresholdHrs: Math.max(1, parseInt(e.target.value || "24", 10)) })} />
+              </label>
+              <p className="set-note">Optional browser notifications require permission. Works best when the tab stays open.</p>
+            </div>
+            <div className="set-card">
+              <h4><Palette size={15} /> Theme</h4>
+              <div className="theme-pick">
+                {THEMES.map(t => (
+                  <button key={t} type="button" className={`theme-swatch ${theme === t ? "on" : ""}`} data-t={t} onClick={() => setTheme(t)}>
+                    {THEME_LABEL[t]}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="set-card">
+              <h4><Calculator size={15} /> Tools</h4>
+              <button className="act" onClick={() => setCalcOpen(true)}><Calculator size={14} /> Open odds calculator</button>
+              <button className="act" onClick={() => { setShowOnboarding(true); setOnboardStep(0); }}><Sparkles size={14} /> Replay onboarding</button>
+              <button className="act" onClick={() => setView("home")}><HelpCircle size={14} /> FAQ on Home</button>
+            </div>
+            <div className="set-card wide">
+              <h4><Shield size={15} /> Session</h4>
+              <div className="ad-conn">
+                <div><span>Mode</span><code>{NOT_DEPLOYED ? "Demo" : "Live"}</code></div>
+                <div><span>Network</span><code>{ACTIVE_CHAIN_NAME}</code></div>
+                <div><span>Telegram</span><code>{IN_TELEGRAM ? "Mini App" : "Browser"}</code></div>
+                <div><span>Contract</span><code>{NOT_DEPLOYED ? "not set" : CONTRACT_ADDRESS}</code></div>
+              </div>
+            </div>
+          </div>
         </section>
       )}
 
@@ -1960,23 +2393,24 @@ export default function App() {
       </footer>
 
       <nav className="bottom-nav" aria-label="Primary">
-        <button type="button" className={view === "home" ? "on" : ""} onClick={() => { setView("home"); tgHaptic("light"); }}>
+        <button type="button" className={view === "home" ? "on" : ""} onClick={() => { setView("home"); tgHaptic("light"); playSound("tap", prefs.sounds); }}>
           <Home size={20} strokeWidth={view === "home" ? 2.4 : 1.8} />
           Home
         </button>
-        <button type="button" className={view === "markets" ? "on" : ""} onClick={() => { setView("markets"); tgHaptic("light"); }}>
+        <button type="button" className={view === "markets" ? "on" : ""} onClick={() => { setView("markets"); tgHaptic("light"); playSound("tap", prefs.sounds); }}>
           <BarChart3 size={20} strokeWidth={view === "markets" ? 2.4 : 1.8} />
           Markets
         </button>
-        <button type="button" className={view === "vault" ? "on" : ""} onClick={() => { setView("vault"); tgHaptic("light"); }}>
+        <button type="button" className={view === "vault" ? "on" : ""} onClick={() => { setView("vault"); tgHaptic("light"); playSound("tap", prefs.sounds); }}>
           <Landmark size={20} strokeWidth={view === "vault" ? 2.4 : 1.8} />
           Vault
         </button>
-        <button type="button" className={view === "portfolio" ? "on" : ""} onClick={() => { setView("portfolio"); tgHaptic("light"); }}>
-          <User size={20} strokeWidth={view === "portfolio" ? 2.4 : 1.8} />
+        <button type="button" className={view === "portfolio" || view === "settings" ? "on" : ""} onClick={() => { setView("portfolio"); tgHaptic("light"); playSound("tap", prefs.sounds); }}>
+          <User size={20} strokeWidth={view === "portfolio" || view === "settings" ? 2.4 : 1.8} />
           You
+          {claimable.length > 0 && <span className="bn-badge">{claimable.length}</span>}
         </button>
-        <button type="button" className={view === "leaderboard" ? "on" : ""} onClick={() => { setView("leaderboard"); tgHaptic("light"); }}>
+        <button type="button" className={view === "leaderboard" ? "on" : ""} onClick={() => { setView("leaderboard"); tgHaptic("light"); playSound("tap", prefs.sounds); }}>
           <Trophy size={20} strokeWidth={view === "leaderboard" ? 2.4 : 1.8} />
           Rank
         </button>

@@ -10,9 +10,15 @@ Peer-to-peer prediction market dApp for the TAC blockchain (EVM layer connected 
 ## Frontend notes
 - Env: `frontend/.env` → `VITE_CONTRACT_ADDRESS` (0x0 = demo mode with seeded sample markets), `VITE_TAC_RPC`.
 - Demo mode: `buildDemoData()` in App.tsx seeds markets/history/leaders when no contract is set. Remove nothing — it powers the pre-deploy showcase.
-- Features: search, sort (trending/newest/ending/volume), watchlist (localStorage `ptac-favs`), share links (`#mk-<id>` deep links), XP/levels/achievements, admin panel, activity feed, leaderboard.
-- Lint: `bun run lint` (oxlint; directory traversal doesn't work on this FS, so package.json lists files explicitly).
-- Build: `bun run build` (tsc + vite). Output in `frontend/dist`.
+- Features: search, sort, watchlist, share (`#mk-<id>` + Telegram share), XP/achievements, admin, activity feed, leaderboard, **bottom nav (TG)**, **odds calculator**, **settings** (haptics/sounds/reduce-motion/ending alerts), **onboarding**, **FAQ**, **claim all**, **CSV export**, **local action journal**, **offline banner**, skeletons, category SVG art.
+- Modules: `frontend/src/graphics/` (CatArt, HeroChartArt, empties), `frontend/src/lib/{prefs,sounds,txJournal,tacChain}.ts`.
+- Lint: `bun run lint` or `npm run lint` (oxlint; files listed explicitly in package.json).
+- Build: `bun run build` / `npm run build`. Output in `frontend/dist`.
+
+## Contract notes (V3)
+- Vault deposit/withdraw, create, bet, sellPosition, resolve, dispute, cancel, refundExpired, claim, claimRefund.
+- Owner trust model for resolution; fee cap 5%; reentrancy guards; solvencyCheck.
+- Future (not shipped): `claimMany(ids[])`, market pagination views, multi-outcome markets — keep V3 API stable for the current frontend ABI.
 
 ## UI/UX notes (July 2026 redesign, round 2)
 - Themes: 4 palettes defined in `src/App.css` under `html[data-theme=...]` — midnight (default), terminal, degen, ledger. Cycled via the Palette button in the nav; persisted in `localStorage("ptac-theme")`. `index.html` sets `data-theme="midnight"` as the initial value.

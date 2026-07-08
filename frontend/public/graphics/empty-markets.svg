@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 180" fill="none">
+  <rect width="240" height="180" rx="24" fill="#15201c"/>
+  <rect x="28" y="36" width="184" height="108" rx="16" stroke="#2ee6a8" stroke-opacity="0.25" stroke-width="2" stroke-dasharray="6 5"/>
+  <path d="M56 120 L92 78 L118 98 L176 52" stroke="#2ee6a8" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="176" cy="52" r="6" fill="#2ee6a8"/>
+  <text x="120" y="160" text-anchor="middle" fill="#8aa89a" font-family="system-ui,sans-serif" font-size="12" font-weight="600">No markets yet</text>
+</svg>

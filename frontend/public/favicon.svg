@@ -1,22 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
-  <defs>
-    <linearGradient id="line" x1="0" y1="1" x2="1" y2="0">
-      <stop offset="0" stop-color="#7c5cff"/>
-      <stop offset="1" stop-color="#00e5a0"/>
-    </linearGradient>
-    <radialGradient id="glow" cx="0.3" cy="0.25" r="1">
-      <stop offset="0" stop-color="#1c2340"/>
-      <stop offset="1" stop-color="#0a0e1a"/>
-    </radialGradient>
-    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
-      <feGaussianBlur stdDeviation="18"/>
-    </filter>
-  </defs>
-  <rect width="512" height="512" rx="116" fill="url(#glow)"/>
-  <rect x="6" y="6" width="500" height="500" rx="112" fill="none" stroke="#7c5cff" stroke-opacity="0.35" stroke-width="4"/>
-  <circle cx="150" cy="140" r="90" fill="#7c5cff" opacity="0.22" filter="url(#soft)"/>
-  <circle cx="380" cy="390" r="100" fill="#00e5a0" opacity="0.14" filter="url(#soft)"/>
-  <path d="M118 356 L216 196 L296 276 L394 132" fill="none" stroke="url(#line)" stroke-width="44" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="394" cy="132" r="30" fill="#00e5a0"/>
-  <circle cx="394" cy="132" r="30" fill="#00e5a0" opacity="0.35" filter="url(#soft)"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <rect width="32" height="32" rx="8" fill="#0b1110"/>
+  <path d="M8 22 L14 12 L19 17 L24 8" stroke="#2ee6a8" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="24" cy="8" r="2.2" fill="#2ee6a8"/>
 </svg>
