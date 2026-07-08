@@ -17,21 +17,20 @@ import { loadPrefs, savePrefs, type Prefs } from "./lib/prefs";
 import { playSound } from "./lib/sounds";
 import { loadJournal, pushJournal, clearJournal, type TxEntry } from "./lib/txJournal";
 import { NETWORKS, resolveChainKey, type ChainKey } from "./lib/networks";
+import {
+  safeJsonParse, safeLocalGet, safeLocalSet, safeLocalRemove,
+  errMessage, parseEtherSafe, isValidRpc, safeHttpUrl, delayStyle, chunkIds,
+} from "./lib/safe";
 import { WalletModal } from "./wallet/WalletModal";
 
 // ─── Runtime config (admin-settable, overrides build-time env) ───
 interface RuntimeConfig { contract?: string; rpc?: string; chain?: ChainKey }
 function loadRuntimeConfig(): RuntimeConfig {
-  try {
-    const raw = JSON.parse(localStorage.getItem("ptac-config") || "{}");
-    return typeof raw === "object" && raw !== null ? raw : {};
-  } catch { return {} }
+  const raw = safeJsonParse<unknown>(safeLocalGet("ptac-config"), {});
+  return typeof raw === "object" && raw !== null ? (raw as RuntimeConfig) : {};
 }
 function saveRuntimeConfig(cfg: RuntimeConfig) {
-  try { localStorage.setItem("ptac-config", JSON.stringify(cfg)) } catch {}
-}
-function isValidRpc(url: string): boolean {
-  return /^https?:\/\//i.test(url);
+  safeLocalSet("ptac-config", JSON.stringify(cfg));
 }
 const RT_CONFIG = loadRuntimeConfig();
 const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
@@ -108,14 +107,19 @@ interface Leader { addr: string; volume: bigint; bets: number; wins: number }
 interface MarketComment { marketId: number; author: string; body: string; time: number }
 
 function loadComments(): MarketComment[] {
-  try { return JSON.parse(localStorage.getItem("ptac-comments") || "[]") } catch { return [] }
+  const arr = safeJsonParse<unknown>(safeLocalGet("ptac-comments"), []);
+  return Array.isArray(arr) ? (arr as MarketComment[]) : [];
 }
 function saveComments(c: MarketComment[]) {
-  try { localStorage.setItem("ptac-comments", JSON.stringify(c.slice(0, 200))) } catch {}
+  safeLocalSet("ptac-comments", JSON.stringify(c.slice(0, 200)));
 }
 function multiOdds(pools: bigint[]): number[] {
+  if (!pools.length) return [];
   const total = pools.reduce((a, b) => a + b, 0n);
-  if (total === 0n) return pools.map(() => Math.round(1000 / pools.length) / 10);
+  if (total === 0n) {
+    const even = Math.round(1000 / pools.length) / 10;
+    return pools.map(() => even);
+  }
   return pools.map(p => Math.round(Number((p * 1000n) / total)) / 10);
 }
 
@@ -125,7 +129,9 @@ declare global { interface Window { ethereum?: any; Telegram?: { WebApp?: any } 
 const DAY_MS = 86400000;
 function todayKey(): string { return new Date().toISOString().slice(0, 10); }
 function loadStreak(): { count: number; last: string } {
-  try { return JSON.parse(localStorage.getItem("ptac-streak") || "") } catch { return { count: 0, last: "" } }
+  const s = safeJsonParse<{ count?: number; last?: string } | null>(safeLocalGet("ptac-streak"), null);
+  if (!s || typeof s.count !== "number") return { count: 0, last: "" };
+  return { count: s.count, last: typeof s.last === "string" ? s.last : "" };
 }
 function bumpStreak(): { count: number; last: string; isNew: boolean } {
   const s = loadStreak();
@@ -134,7 +140,7 @@ function bumpStreak(): { count: number; last: string; isNew: boolean } {
   const yesterday = new Date(Date.now() - DAY_MS).toISOString().slice(0, 10);
   const count = s.last === yesterday ? s.count + 1 : 1;
   const next = { count, last: today };
-  try { localStorage.setItem("ptac-streak", JSON.stringify(next)) } catch {}
+  safeLocalSet("ptac-streak", JSON.stringify(next));
   return { ...next, isNew: true };
 }
 
@@ -147,19 +153,18 @@ const DAILY_QUESTS: Quest[] = [
 ];
 type QuestProgress = Record<string, number>;
 function loadQuests(): QuestProgress {
-  try {
-    const raw = JSON.parse(localStorage.getItem("ptac-quests") || "");
-    if (raw.day === todayKey()) return raw.progress || {};
-  } catch {}
+  const raw = safeJsonParse<{ day?: string; progress?: QuestProgress } | null>(safeLocalGet("ptac-quests"), null);
+  if (raw && raw.day === todayKey() && raw.progress && typeof raw.progress === "object") return raw.progress;
   return {};
 }
 function saveQuests(progress: QuestProgress) {
-  try { localStorage.setItem("ptac-quests", JSON.stringify({ day: todayKey(), progress })) } catch {}
+  safeLocalSet("ptac-quests", JSON.stringify({ day: todayKey(), progress }));
 }
 function loadBonusXp(): number {
-  try { return parseInt(localStorage.getItem("ptac-bonusxp") || "0", 10) || 0 } catch { return 0 }
+  const n = parseInt(safeLocalGet("ptac-bonusxp") || "0", 10);
+  return Number.isFinite(n) && n > 0 ? n : 0;
 }
-function saveBonusXp(v: number) { try { localStorage.setItem("ptac-bonusxp", String(v)) } catch {} }
+function saveBonusXp(v: number) { safeLocalSet("ptac-bonusxp", String(Math.max(0, v | 0))); }
 
 const TG = typeof window !== "undefined" ? window.Telegram?.WebApp : undefined;
 const IN_TELEGRAM = !!TG?.initData || !!TG?.platform && TG.platform !== "unknown";
@@ -574,9 +579,7 @@ export default function App() {
   const [leaders, setLeaders] = useState<Leader[]>([]);
   const [loading, setLoading] = useState(false);
   const [view, setView] = useState<"home" | "markets" | "vault" | "portfolio" | "leaderboard" | "admin" | "settings" | "tools">("home");
-  const [theme, setTheme] = useState<string>(() => {
-    try { return localStorage.getItem("ptac-theme") || "midnight"; } catch { return "midnight"; }
-  });
+  const [theme, setTheme] = useState<string>(() => safeLocalGet("ptac-theme") || "midnight");
   const [prefs, setPrefs] = useState<Prefs>(() => loadPrefs());
   const [journal, setJournal] = useState<TxEntry[]>(() => loadJournal());
   const [showOnboarding, setShowOnboarding] = useState(() => !loadPrefs().onboardingDone);
@@ -588,14 +591,16 @@ export default function App() {
   const [faqOpen, setFaqOpen] = useState<number | null>(0);
   const [online, setOnline] = useState(typeof navigator !== "undefined" ? navigator.onLine : true);
   const [alertedIds, setAlertedIds] = useState<Set<number>>(() => {
-    try { return new Set(JSON.parse(localStorage.getItem("ptac-alerted") || "[]")); } catch { return new Set(); }
+    const arr = safeJsonParse<unknown>(safeLocalGet("ptac-alerted"), []);
+    return new Set(Array.isArray(arr) ? arr.filter((x): x is number => typeof x === "number") : []);
   });
   const [tab, setTab] = useState<"all" | "open" | "ending" | "resolved" | "mine">("all");
   const [catFilter, setCatFilter] = useState("");
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState<"trending" | "newest" | "ending" | "volume" | "watchlist">("trending");
   const [favorites, setFavorites] = useState<number[]>(() => {
-    try { return JSON.parse(localStorage.getItem("ptac-favs") || "[]"); } catch { return []; }
+    const arr = safeJsonParse<unknown>(safeLocalGet("ptac-favs"), []);
+    return Array.isArray(arr) ? arr.filter((x): x is number => typeof x === "number") : [];
   });
   const [expanded, setExpanded] = useState<number | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -606,7 +611,14 @@ export default function App() {
   const [successAnimation, setSuccessAnimation] = useState<"ripple" | "money" | "connection" | null>(null);
   const [now, setNow] = useState(Math.floor(Date.now() / 1000));
   const [newAchievement, setNewAchievement] = useState<Achievement | null>(null);
-  const seenAchievements = useRef<Set<string>>(new Set(JSON.parse(localStorage.getItem("ptac-ach") || "[]")));
+  const seenAchievements = useRef<Set<string>>(
+    new Set(
+      (() => {
+        const arr = safeJsonParse<unknown>(safeLocalGet("ptac-ach"), []);
+        return Array.isArray(arr) ? arr.filter((x): x is string => typeof x === "string") : [];
+      })()
+    )
+  );
   const [streak, setStreak] = useState<{ count: number; last: string }>(() => loadStreak());
   const [showStreakPop, setShowStreakPop] = useState(false);
   const [quests, setQuests] = useState<QuestProgress>(() => loadQuests());
@@ -643,7 +655,7 @@ export default function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     document.documentElement.dataset.motion = prefs.reduceMotion ? "reduce" : "full";
-    try { localStorage.setItem("ptac-theme", theme); } catch {}
+    safeLocalSet("ptac-theme", theme);
     prefsHaptics = prefs.haptics;
   }, [theme, prefs.reduceMotion, prefs.haptics]);
   const THEMES = useMemo(() => ["midnight", "terminal", "degen", "ledger"] as const, []);
@@ -834,14 +846,14 @@ export default function App() {
   const toggleFavorite = useCallback((id: number) => {
     setFavorites(curr => {
       const next = curr.includes(id) ? curr.filter(n => n !== id) : [id, ...curr];
-      localStorage.setItem("ptac-favs", JSON.stringify(next));
+      safeLocalSet("ptac-favs", JSON.stringify(next));
       if (!curr.includes(id)) questBump("curator");
       return next;
     });
   }, [questBump]);
 
   useEffect(() => {
-    try { localStorage.setItem("ptac-favs", JSON.stringify(favorites)); } catch {}
+    safeLocalSet("ptac-favs", JSON.stringify(favorites));
   }, [favorites]);
 
   useEffect(() => {
@@ -905,8 +917,8 @@ export default function App() {
       showConnectionPulse();
       notify(`EVM wallet on ${ACTIVE_CHAIN_NAME} ⚡`);
       setWalletModal(false);
-    } catch (e: any) {
-      notify(e?.shortMessage || e?.message || "EVM connection failed", true);
+    } catch (e: unknown) {
+      notify(errMessage(e, "EVM connection failed"), true);
     } finally {
       setWalletBusy(null);
     }
@@ -919,16 +931,18 @@ export default function App() {
       if (window.ethereum && IN_TELEGRAM) {
         try {
           await connectEvmWallet();
-          if (account || window.ethereum.selectedAddress) {
+          // Use provider selection, not React state (stale after await)
+          const selected = window.ethereum.selectedAddress
+            || (await new ethers.BrowserProvider(window.ethereum).send("eth_accounts", []))[0];
+          if (selected) {
             setWalletKind("evm");
             return;
           }
         } catch { /* fall through to TON Connect */ }
       }
       await tonConnectUI.openModal();
-      // tonWallet state updates via hook; also read immediately after modal flow
-    } catch (e: any) {
-      notify(e?.message || "TON Connect failed", true);
+    } catch (e: unknown) {
+      notify(errMessage(e, "TON Connect failed"), true);
     } finally {
       setWalletBusy(null);
     }
@@ -1017,9 +1031,8 @@ export default function App() {
         const { resolveTacSmartAccount } = await import("./lib/tacSdk");
         const sa = await resolveTacSmartAccount(CHAIN_PREF, raw, CONTRACT_ADDRESS);
         if (sa && ethers.isAddress(sa)) {
+          // Display-only smart account — never set as signing `account` without a signer
           setSmartAccount(sa);
-          // Use SA for read-only portfolio when no MetaMask account
-          setAccount(prev => (prev && walletKind === "evm" ? prev : sa));
         }
       } catch (e) {
         console.warn("TAC SA resolve skipped", e);
@@ -1242,16 +1255,16 @@ export default function App() {
     for (const a of unlocked) {
       if (!seenAchievements.current.has(a.id)) {
         seenAchievements.current.add(a.id);
-        localStorage.setItem("ptac-ach", JSON.stringify([...seenAchievements.current]));
+        safeLocalSet("ptac-ach", JSON.stringify([...seenAchievements.current]));
         setNewAchievement(a);
         fireConfetti();
-        setTimeout(() => setNewAchievement(null), 4200);
-        break;
+        const t = window.setTimeout(() => setNewAchievement(null), 4200);
+        return () => window.clearTimeout(t);
       }
     }
   }, [unlocked]);
 
-  async function tx(key: string, fn: () => Promise<any>, okMsg: string, celebrate = false) {
+  async function tx(key: string, fn: () => Promise<{ wait: () => Promise<unknown> } | null>, okMsg: string, celebrate = false) {
     if (NOT_DEPLOYED) {
       setBusy(b => ({ ...b, [key]: true }));
       await new Promise(r => setTimeout(r, 650));
@@ -1262,9 +1275,14 @@ export default function App() {
       if (celebrate) fireConfetti();
       return;
     }
+    if (!signer) {
+      notify("Connect an EVM wallet to sign transactions", true);
+      return;
+    }
     setBusy(b => ({ ...b, [key]: true }));
     try {
       const r = await fn();
+      if (!r) throw new Error("No transaction returned");
       notify("Transaction sent — confirming…");
       await r.wait();
       notify(okMsg);
@@ -1272,18 +1290,17 @@ export default function App() {
       playSound(celebrate ? "win" : "bet", prefs.sounds);
       if (celebrate) fireConfetti();
       await loadAll();
-    } catch (e: any) {
-      const msg = e?.shortMessage || e?.reason || e?.message || "Transaction failed";
+    } catch (e: unknown) {
+      const msg = errMessage(e, "Transaction failed");
       notify(msg, true);
       logTx(key, msg, false);
     } finally { setBusy(b => ({ ...b, [key]: false })) }
   }
 
   const deposit = () => {
-    const v = parseFloat(depositAmt);
-    if (!v || v <= 0) return notify("Enter amount", true);
+    const wei = parseEtherSafe(depositAmt);
+    if (wei == null) return notify("Enter a valid amount", true);
     if (NOT_DEPLOYED) {
-      const wei = ethers.parseEther(depositAmt);
       tx("deposit", async () => null, `Deposited ${depositAmt} TAC 🏦`, true).then(() => {
         setVaultBalance(b => b + wei);
         setWalletBalance(b => (b >= wei ? b - wei : 0n));
@@ -1291,14 +1308,14 @@ export default function App() {
       });
       return;
     }
-    tx("deposit", () => contract(true).deposit({ value: ethers.parseEther(depositAmt) }), `Deposited ${depositAmt} TAC 🏦`, true).then(() => {
+    tx("deposit", () => contract(true).deposit({ value: wei }), `Deposited ${depositAmt} TAC 🏦`, true).then(() => {
       showMoneyRain();
     });
   };
   const withdraw = () => {
     if (NOT_DEPLOYED) {
-      let wei: bigint;
-      try { wei = withdrawAmt ? ethers.parseEther(withdrawAmt) : vaultBalance } catch { return notify("Invalid amount", true) }
+      const wei = withdrawAmt.trim() ? parseEtherSafe(withdrawAmt) : vaultBalance;
+      if (wei == null) return notify("Invalid amount", true);
       if (wei > vaultBalance) return notify("Insufficient vault balance", true);
       tx("withdraw", async () => null, withdrawAmt ? `Withdrew ${withdrawAmt} TAC` : "Withdrew full vault balance").then(() => {
         setVaultBalance(b => b - wei);
@@ -1307,14 +1324,16 @@ export default function App() {
       });
       return;
     }
-    if (!withdrawAmt) return tx("withdraw", () => contract(true).withdrawAll(), "Withdrew full vault balance");
-    tx("withdraw", () => contract(true).withdraw(ethers.parseEther(withdrawAmt)), `Withdrew ${withdrawAmt} TAC`);
+    if (!withdrawAmt.trim()) return tx("withdraw", () => contract(true).withdrawAll(), "Withdrew full vault balance");
+    const w = parseEtherSafe(withdrawAmt);
+    if (w == null) return notify("Invalid amount", true);
+    tx("withdraw", () => contract(true).withdraw(w), `Withdrew ${withdrawAmt} TAC`);
   };
   const createMarket = () => {
     if (!q.trim()) return notify("Enter a question", true);
-    const amt = parseFloat(stake);
-    if (!amt || amt < 0.01) return notify("Stake ≥ 0.01 TAC", true);
-    if (ethers.parseEther(stake) > vaultBalance) return notify("Insufficient vault — deposit first", true);
+    const stakeWei = parseEtherSafe(stake);
+    if (stakeWei == null || stakeWei < ethers.parseEther("0.01")) return notify("Stake ≥ 0.01 TAC", true);
+    if (stakeWei > vaultBalance) return notify("Insufficient vault — deposit first", true);
     const rt = Math.floor(Date.now() / 1000) + DURATIONS[duration] * 86400;
     const labels = multiMode
       ? outcomeDrafts.map(s => s.trim()).filter(Boolean)
@@ -1322,22 +1341,23 @@ export default function App() {
     if (multiMode && (labels.length < 2 || labels.length > 8)) return notify("Need 2–8 outcomes", true);
     const isMulti = multiMode && labels.length >= 3;
     const seedLabel = labels[0] || "YES";
+    if (resolutionSource && resolutionSource.length > 300) return notify("Oracle source too long", true);
     if (NOT_DEPLOYED) {
-      const wei = ethers.parseEther(stake);
+      const wei = stakeWei;
       tx("create", async () => null, `Market live — staked on ${seedLabel} 🎯`, true).then(() => {
         setMarkets(ms => {
-          const nid = Math.max(0, ...ms.map(m => m.id)) + 1;
+          const nid = (ms.length ? Math.max(...ms.map(m => m.id)) : 0) + 1;
           const pools = labels.map((_, i) => i === 0 ? wei : 0n);
           const bettors = labels.map((_, i) => i === 0 ? 1 : 0);
           return [{
             id: nid, creator: account || "0xDE300000000000000000000000000000000000AC",
-            question: q, description: desc, category: cat,
+            question: q.slice(0, 200), description: desc.slice(0, 1000), category: cat,
             resolutionTime: rt, createdAt: Math.floor(Date.now() / 1000),
             totalYesPool: !isMulti ? wei : 0n, totalNoPool: 0n, status: STATUS.Open, winner: SIDE.None,
             yesBettors: !isMulti ? 1 : 0, noBettors: 0,
             mySide: !isMulti ? SIDE.Yes : SIDE.None,
             myAmount: wei, myClaimed: false, potYes: 0n, potNo: 0n,
-            resolutionSource,
+            resolutionSource: resolutionSource.slice(0, 300),
             outcomeCount: labels.length,
             outcomeLabels: labels,
             outcomePools: pools,
@@ -1352,12 +1372,12 @@ export default function App() {
       return;
     }
     const c = contract(true);
-    const wei = ethers.parseEther(stake);
+    const wei = stakeWei;
     const fn = isMulti
-      ? () => c.createMultiMarket(q, desc, cat, resolutionSource, rt, wei, labels)
+      ? () => c.createMultiMarket(q.slice(0, 200), desc.slice(0, 1000), cat, resolutionSource.slice(0, 300), rt, wei, labels)
       : resolutionSource
-        ? () => c.createMarketWithSource(q, desc, cat, resolutionSource, rt, wei)
-        : () => c.createMarket(q, desc, cat, rt, wei);
+        ? () => c.createMarketWithSource(q.slice(0, 200), desc.slice(0, 1000), cat, resolutionSource.slice(0, 300), rt, wei)
+        : () => c.createMarket(q.slice(0, 200), desc.slice(0, 1000), cat, rt, wei);
     tx("create", fn, `Market live — staked on ${seedLabel} 🎯`, true).then(() => {
       setShowCreate(false); setQ(""); setDesc(""); setResolutionSource("");
     });
@@ -1365,8 +1385,8 @@ export default function App() {
 
   const betOutcome = (id: number, outcomeIndex: number) => {
     const amt = betAmt[id] || "5";
-    let wei: bigint;
-    try { wei = ethers.parseEther(amt) } catch { return notify("Invalid amount", true) }
+    const wei = parseEtherSafe(amt);
+    if (wei == null) return notify("Invalid amount", true);
     if (wei < ethers.parseEther("0.01")) return notify("Minimum bet is 0.01 TAC", true);
     if (wei > vaultBalance) return notify("Insufficient vault balance — deposit first", true);
     const mkt = markets.find(m => m.id === id);
@@ -1433,8 +1453,8 @@ export default function App() {
   };
   const bet = (id: number, side: 1 | 2) => {
     const amt = betAmt[id] || "5";
-    let wei: bigint;
-    try { wei = ethers.parseEther(amt) } catch { return notify("Invalid amount", true) }
+    const wei = parseEtherSafe(amt);
+    if (wei == null) return notify("Invalid amount", true);
     if (wei < ethers.parseEther("0.01")) return notify("Minimum bet is 0.01 TAC", true);
     if (wei > vaultBalance) return notify("Insufficient vault balance — deposit first", true);
     const mkt = markets.find(m => m.id === id);
@@ -1646,8 +1666,9 @@ export default function App() {
       }
     }
     setAlertedIds(next);
-    try { localStorage.setItem("ptac-alerted", JSON.stringify([...next])); } catch { /* noop */ }
-  }, [markets, now, prefs.endingAlerts, prefs.alertThresholdHrs]); // eslint-disable-line react-hooks/exhaustive-deps
+    safeLocalSet("ptac-alerted", JSON.stringify([...next]));
+    // Intentionally omit `now` — re-check when markets list refreshes, not every second
+  }, [markets, prefs.endingAlerts, prefs.alertThresholdHrs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const calcPayout = useMemo(() => {
     const yesPct = Math.min(99.9, Math.max(0.1, parseFloat(calcYes) || 50));
@@ -1667,7 +1688,7 @@ export default function App() {
 
   async function claimAll() {
     if (!account || claimable.length === 0) return notify("Nothing to claim", true);
-    const ids = claimable.map(m => m.id);
+    const ids = chunkIds(claimable.map(m => m.id), 50);
     if (NOT_DEPLOYED) {
       for (const m of claimable) {
         if (m.status === STATUS.Resolved) await claim(m.id);
@@ -1675,6 +1696,7 @@ export default function App() {
       }
       return;
     }
+    if (!signer) return notify("Connect an EVM wallet to claim", true);
     await tx("claim-many", () => contract(true).claimMany(ids), `Claimed ${ids.length} market(s) → vault 💰`, true);
   }
 
@@ -2221,7 +2243,7 @@ export default function App() {
               const leadPct = isMulti ? (multiPcts[leadIdx] || 0) : o.y;
               const leadLab = isMulti ? ((m.outcomeLabels || [])[leadIdx] || "—") : "YES";
               return (
-                <div key={m.id} id={`mk-${m.id}`} className={`card ${!open ? "done" : ""} ${isExp ? "exp" : ""} ${urgent ? "hot" : ""} ${isMulti ? "multi" : ""}`} style={{ "--d": `${Math.min(idx, 8) * 55}ms` } as any}>
+                <div key={m.id} id={`mk-${m.id}`} className={`card ${!open ? "done" : ""} ${isExp ? "exp" : ""} ${urgent ? "hot" : ""} ${isMulti ? "multi" : ""}`} style={delayStyle(Math.min(idx, 8) * 55)}>
                   <div className="card-head" onClick={() => { setExpanded(isExp ? null : m.id); if (!isExp) questBump("scout"); }}>
                     <div className="ch-left">
                       <span className="cat-chip art"><CatArt cat={m.category} size={16} /> {CAT_LABEL[m.category] || m.category}</span>
@@ -2335,7 +2357,14 @@ export default function App() {
                       {(m.outcomeCount || 2) <= 2 && <ProbChart points={hist} />}
                       {m.description && <p className="desc">{m.description}</p>}
                       {m.resolutionSource && (
-                        <div className="oracle-pill"><Shield size={12} /> Oracle: <a href={/^https?:\/\//i.test(m.resolutionSource) ? m.resolutionSource : undefined} target="_blank" rel="noreferrer">{m.resolutionSource}</a></div>
+                        <div className="oracle-pill">
+                          <Shield size={12} /> Oracle:{" "}
+                          {safeHttpUrl(m.resolutionSource) ? (
+                            <a href={safeHttpUrl(m.resolutionSource)} target="_blank" rel="noopener noreferrer">{m.resolutionSource}</a>
+                          ) : (
+                            <span>{m.resolutionSource}</span>
+                          )}
+                        </div>
                       )}
                       <div className="facts">
                         <span><Clock size={12} /> Resolves {new Date(m.resolutionTime * 1000).toLocaleString()}</span>
@@ -2484,7 +2513,7 @@ export default function App() {
               <h3><Activity size={16} /> Live Activity</h3>
               <div className="feed-list">
                 {activity.map((a, i) => (
-                  <div key={i} className={`feed-item ${a.type}`} style={{ "--d": `${i * 35}ms` } as any}>
+                  <div key={i} className={`feed-item ${a.type}`} style={delayStyle(i * 35)}>
                     <span className="feed-ico">{a.type === "create" ? "✨" : a.type === "bet" ? "🎯" : a.type === "resolve" ? "🏁" : a.type === "claim" ? "💰" : a.type === "deposit" ? "🏦" : a.type === "sell" ? "📤" : "↗"}</span>
                     {a.text}
                     <span className="feed-block">#{a.block}</span>
@@ -2777,7 +2806,7 @@ export default function App() {
           {leaders.length === 0 && <div className="empty"><Trophy size={22} />No activity indexed yet.</div>}
           <div className="lb-list">
             {leaders.map((l, i) => (
-              <div key={l.addr} className={`lb-row ${i < 3 ? `top t${i + 1}` : ""} ${account && l.addr === account.toLowerCase() ? "me" : ""}`} style={{ "--d": `${i * 45}ms` } as any}>
+              <div key={l.addr} className={`lb-row ${i < 3 ? `top t${i + 1}` : ""} ${account && l.addr === account.toLowerCase() ? "me" : ""}`} style={delayStyle(i * 45)}>
                 <span className="lb-rank">{i === 0 ? <Crown size={17} /> : i === 1 ? <Medal size={16} /> : i === 2 ? <Star size={15} /> : `#${i + 1}`}</span>
                 <span className="lb-addr">{l.addr.slice(0, 8)}…{l.addr.slice(-6)}{account && l.addr === account.toLowerCase() ? " (you)" : ""}</span>
                 <span className="lb-bets">{l.bets} bets</span>
@@ -2883,7 +2912,7 @@ export default function App() {
                     }}
                   >Save & reload</button>
                   <button className="btn-ghost" onClick={() => {
-                    try { localStorage.removeItem("ptac-config") } catch {}
+                    safeLocalRemove("ptac-config");
                     notify("Config cleared — back to build defaults");
                     setTimeout(() => window.location.reload(), 900);
                   }}>Reset to defaults</button>

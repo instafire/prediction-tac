@@ -369,13 +369,16 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
 
     /// @notice Exit part or all of an open position. Returns stake to vault minus protocol fee.
     ///         Pari-mutuel pools have no market-price exit; this is a stake withdrawal.
+    ///         Works for binary (side) and multi-outcome (multiSide) markets.
     function sellPosition(uint256 marketId, uint256 amount) external notPaused nonReentrant {
         Market storage m = markets[marketId];
         require(m.creator != address(0), "Market not found");
         require(m.status == Status.Open, "Market not open");
         require(block.timestamp < m.resolutionTime, "Market expired");
+        uint8 multiSide1 = m.multiSide[msg.sender]; // 1-based
         Side userSide = m.side[msg.sender];
-        require(userSide != Side.None, "No position");
+        bool isMulti = m.outcomeCount > 2;
+        require(userSide != Side.None || multiSide1 != 0, "No position");
         uint256 held = m.amounts[msg.sender];
         require(amount > 0 && amount <= held, "Bad amount");
 
@@ -384,19 +387,39 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
         accumulatedFees += fee;
 
         m.amounts[msg.sender] = held - amount;
-        if (userSide == Side.Yes) m.totalYesPool -= amount;
-        else m.totalNoPool -= amount;
 
-        if (m.amounts[msg.sender] == 0) {
-            m.side[msg.sender] = Side.None;
-            if (userSide == Side.Yes) m.yesBettors--;
-            else m.noBettors--;
+        if (isMulti) {
+            uint8 oi = multiSide1 - 1;
+            m.multiPools[oi] -= amount;
+            if (m.amounts[msg.sender] == 0) {
+                m.multiSide[msg.sender] = 0;
+                if (m.multiBettors[oi] > 0) m.multiBettors[oi]--;
+            }
+            emit MultiPositionSold(marketId, msg.sender, oi, amount, returned, uint64(block.timestamp));
+        } else {
+            if (userSide == Side.Yes) {
+                m.totalYesPool -= amount;
+                m.multiPools[0] -= amount;
+            } else {
+                m.totalNoPool -= amount;
+                m.multiPools[1] -= amount;
+            }
+            if (m.amounts[msg.sender] == 0) {
+                m.side[msg.sender] = Side.None;
+                m.multiSide[msg.sender] = 0;
+                if (userSide == Side.Yes) {
+                    if (m.yesBettors > 0) m.yesBettors--;
+                    if (m.multiBettors[0] > 0) m.multiBettors[0]--;
+                } else {
+                    if (m.noBettors > 0) m.noBettors--;
+                    if (m.multiBettors[1] > 0) m.multiBettors[1]--;
+                }
+            }
+            emit PositionSold(marketId, msg.sender, userSide, amount, returned, uint64(block.timestamp));
         }
 
         vaultBalance[msg.sender] += returned;
         totalVaultBalance += returned;
-
-        emit PositionSold(marketId, msg.sender, userSide, amount, returned, uint64(block.timestamp));
     }
 
     // ════════ RESOLUTION ════════
@@ -479,15 +502,31 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
         Market storage m = markets[marketId];
         require(m.creator == msg.sender, "Not creator");
         require(m.status == Status.Open, "Not open");
-        require(m.totalNoPool == 0 && m.yesBettors == 1, "Has other bettors");
 
-        m.status = Status.Cancelled;
-        uint256 refund = m.totalYesPool;
-        m.totalYesPool = 0;
-        m.hasClaimed[msg.sender] = true;
-
-        vaultBalance[msg.sender] += refund;
-        totalVaultBalance += refund;
+        // Only creator has a position and no opposing liquidity.
+        if (m.outcomeCount > 2) {
+            uint256 total = _totalPool(m);
+            require(total == m.amounts[msg.sender] && m.amounts[msg.sender] > 0, "Has other bettors");
+            uint8 oi = m.multiSide[msg.sender];
+            require(oi != 0, "No position");
+            m.status = Status.Cancelled;
+            uint256 refund = m.amounts[msg.sender];
+            m.multiPools[oi - 1] = 0;
+            m.amounts[msg.sender] = 0;
+            m.multiSide[msg.sender] = 0;
+            m.hasClaimed[msg.sender] = true;
+            vaultBalance[msg.sender] += refund;
+            totalVaultBalance += refund;
+        } else {
+            require(m.totalNoPool == 0 && m.yesBettors == 1, "Has other bettors");
+            m.status = Status.Cancelled;
+            uint256 refund = m.totalYesPool;
+            m.totalYesPool = 0;
+            m.multiPools[0] = 0;
+            m.hasClaimed[msg.sender] = true;
+            vaultBalance[msg.sender] += refund;
+            totalVaultBalance += refund;
+        }
 
         emit MarketCancelled(marketId, uint64(block.timestamp));
     }
@@ -530,12 +569,18 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
     // ════════ CLAIM WINNINGS ════════
 
     function claim(uint256 marketId) external nonReentrant {
-        uint256 paid = _claimOne(marketId, msg.sender);
+        Market storage m = markets[marketId];
+        require(m.status == Status.Resolved, "Not resolved");
+        require(block.timestamp >= uint256(m.resolvedAt) + DISPUTE_WINDOW, "Dispute window active");
+        require(!m.hasClaimed[msg.sender], "Already claimed");
+        (bool ok, uint256 paid) = _tryClaimOne(marketId, msg.sender);
+        require(ok, "No position");
         if (paid > 0) emit Claimed(marketId, msg.sender, paid, uint64(block.timestamp));
     }
 
-    /// @notice Batch claim resolved / refundable positions. Skips markets that revert conditions.
+    /// @notice Batch claim resolved / refundable positions. Skips markets that are not claimable.
     function claimMany(uint256[] calldata marketIds) external nonReentrant {
+        require(marketIds.length <= 50, "Too many");
         uint256 totalPaid;
         uint256 count;
         for (uint256 i = 0; i < marketIds.length; i++) {
@@ -545,13 +590,12 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
 
             if (m.status == Status.Resolved) {
                 if (block.timestamp < uint256(m.resolvedAt) + DISPUTE_WINDOW) continue;
-                uint256 paid = _claimOne(id, msg.sender);
+                (bool ok, uint256 paid) = _tryClaimOne(id, msg.sender);
+                if (!ok) continue;
+                count++;
                 if (paid > 0) {
                     totalPaid += paid;
-                    count++;
                     emit Claimed(id, msg.sender, paid, uint64(block.timestamp));
-                } else if (m.hasClaimed[msg.sender]) {
-                    count++; // recorded loss
                 }
             } else if (m.status == Status.Refunded || m.status == Status.Cancelled) {
                 if (m.amounts[msg.sender] == 0) continue;
@@ -568,36 +612,37 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
         emit BatchClaimed(msg.sender, count, totalPaid);
     }
 
-    function _claimOne(uint256 marketId, address user) internal returns (uint256 share) {
+    /// @dev Soft claim: returns (false, 0) instead of reverting so claimMany can skip bad ids.
+    function _tryClaimOne(uint256 marketId, address user) internal returns (bool ok, uint256 share) {
         Market storage m = markets[marketId];
-        require(m.status == Status.Resolved, "Not resolved");
-        require(block.timestamp >= uint256(m.resolvedAt) + DISPUTE_WINDOW, "Dispute window active");
-        require(!m.hasClaimed[user], "Already claimed");
+        if (m.status != Status.Resolved) return (false, 0);
+        if (block.timestamp < uint256(m.resolvedAt) + DISPUTE_WINDOW) return (false, 0);
+        if (m.hasClaimed[user]) return (false, 0);
 
         bool isMulti = m.outcomeCount > 2;
         if (isMulti) {
             uint8 userOut = m.multiSide[user];
-            require(userOut != 0, "No position");
+            if (userOut == 0) return (false, 0);
             m.hasClaimed[user] = true;
             if (userOut - 1 != m.winnerOutcome) {
                 userStats[user].losses++;
-                return 0;
+                return (true, 0);
             }
             uint256 winnerPool = m.multiPools[m.winnerOutcome];
             uint256 totalPool = _totalPool(m);
-            require(winnerPool > 0, "Winner pool empty");
+            if (winnerPool == 0) return (false, 0);
             share = (m.amounts[user] * totalPool) / winnerPool;
         } else {
             Side userSide = m.side[user];
-            require(userSide != Side.None, "No position");
+            if (userSide == Side.None) return (false, 0);
             m.hasClaimed[user] = true;
             if (userSide != m.winner) {
                 userStats[user].losses++;
-                return 0;
+                return (true, 0);
             }
             uint256 winnerPool = m.winner == Side.Yes ? m.totalYesPool : m.totalNoPool;
             uint256 totalPool = m.totalYesPool + m.totalNoPool;
-            require(winnerPool > 0, "Winner pool empty");
+            if (winnerPool == 0) return (false, 0);
             share = (m.amounts[user] * totalPool) / winnerPool;
         }
 
@@ -605,6 +650,7 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
         totalVaultBalance += share;
         userStats[user].wins++;
         userStats[user].totalWon += share;
+        return (true, share);
     }
 
     // ════════ COMMENTS (event log — index off-chain) ════════

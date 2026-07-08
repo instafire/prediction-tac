@@ -149,6 +149,45 @@ contract PredictionPoolV3FeaturesTest is Test {
         pool.postComment(1, "");
     }
 
+    function test_ClaimManySkipsUnclaimable() public {
+        vm.prank(alice);
+        pool.createMarket("Q1?", "d", "crypto", uint64(block.timestamp + 7 days), 100 ether);
+        vm.prank(bob);
+        pool.bet(1, PredictionPoolV3.Side.No, 100 ether);
+        vm.warp(block.timestamp + 8 days);
+        vm.prank(owner);
+        pool.resolve(1, PredictionPoolV3.Side.Yes);
+        // still in dispute window — claimMany should no-op (not revert)
+        uint256[] memory ids = new uint256[](2);
+        ids[0] = 1;
+        ids[1] = 99; // missing market
+        uint256 before = pool.vaultBalance(alice);
+        vm.prank(alice);
+        pool.claimMany(ids);
+        assertEq(pool.vaultBalance(alice), before);
+        // after dispute window, claim works
+        vm.warp(block.timestamp + 3 days + 1);
+        vm.prank(alice);
+        pool.claimMany(ids);
+        assertGt(pool.vaultBalance(alice), before);
+    }
+
+    function test_SellMultiPosition() public {
+        string[] memory outcomes = new string[](3);
+        outcomes[0] = "A";
+        outcomes[1] = "B";
+        outcomes[2] = "C";
+        vm.prank(alice);
+        uint256 id = pool.createMultiMarket("Who?", "d", "sports", "src", uint64(block.timestamp + 3 days), 100 ether, outcomes);
+        vm.prank(bob);
+        pool.betOutcome(id, 1, 50 ether);
+        uint256 before = pool.vaultBalance(bob);
+        uint256 held = 50 ether - (50 ether * 20 / 1000);
+        vm.prank(bob);
+        pool.sellPosition(id, held / 2);
+        assertGt(pool.vaultBalance(bob), before);
+    }
+
     function test_MultiDispute() public {
         string[] memory outcomes = new string[](3);
         outcomes[0] = "A";
