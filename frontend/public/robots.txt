@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://tac-prediction-pool-delhi.zocomputer.io/sitemap.xml
