@@ -5,7 +5,7 @@ import {
   ChevronDown, Sparkles, Target, Award, Crown, Medal, Star, Activity,
   ArrowUpRight, ArrowDownRight, RefreshCw, Plus, Pause, Play, Landmark,
   CircleDollarSign, Users, Eye, Scale, PartyPopper, Gauge, X,
-  Search, ArrowUpDown, Bookmark, Link2, Palette
+  Search, ArrowUpDown, Bookmark, Link2, Palette, Home, User
 } from "lucide-react";
 import abi from "./abi.json";
 import "./App.css";
@@ -1188,19 +1188,19 @@ export default function App() {
 
       <nav className="topnav">
         <div className="brand" onClick={() => setView("home")}>
-          <svg className="brand-logo" viewBox="0 0 32 32" width="30" height="30">
-            <defs><linearGradient id="bl" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stopColor="#7c5cff" /><stop offset="1" stopColor="#00e5a0" /></linearGradient></defs>
-            <rect width="32" height="32" rx="8" fill="rgba(124,92,255,.12)" />
+          <svg className="brand-logo" viewBox="0 0 32 32" width="30" height="30" aria-hidden>
+            <defs><linearGradient id="bl" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stopColor="#2ee6a8" /><stop offset="1" stopColor="#22d38a" /></linearGradient></defs>
+            <rect width="32" height="32" rx="9" fill="rgba(46,230,168,.14)" />
             <path d="M8 22 L14 12 L19 17 L24 8" stroke="url(#bl)" strokeWidth="3" fill="none" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
           <span className="brand-name">Prediction<b>Tac</b></span>
         </div>
         <div className="nav-tabs">
-          <button className={view === "home" ? "on" : ""} onClick={() => setView("home")}><Sparkles size={15} /> Home</button>
+          <button className={view === "home" ? "on" : ""} onClick={() => setView("home")}><Home size={15} /> Home</button>
           <button className={view === "markets" ? "on" : ""} onClick={() => setView("markets")}><BarChart3 size={15} /> Markets</button>
           <button className={view === "vault" ? "on" : ""} onClick={() => setView("vault")}><Landmark size={15} /> Vault</button>
-          <button className={view === "portfolio" ? "on" : ""} onClick={() => setView("portfolio")}><Target size={15} /> Portfolio</button>
-          <button className={view === "leaderboard" ? "on" : ""} onClick={() => setView("leaderboard")}><Trophy size={15} /> Leaders</button>
+          <button className={view === "portfolio" ? "on" : ""} onClick={() => setView("portfolio")}><User size={15} /> You</button>
+          <button className={view === "leaderboard" ? "on" : ""} onClick={() => setView("leaderboard")}><Trophy size={15} /> Rank</button>
           {isOwner && <button className={`admin-tab ${view === "admin" ? "on" : ""}`} onClick={() => setView("admin")}><Shield size={15} /> Admin</button>}
         </div>
         <div className="nav-right">
@@ -1252,9 +1252,9 @@ export default function App() {
           <header className="hero">
             <div className="hero-grid">
               <div className="hero-inner">
-                <div className="hero-badge"><span className="pulse-dot" /><Sparkles size={13} /> Gamified prediction markets on TAC</div>
+                <div className="hero-badge"><span className="pulse-dot" /><Sparkles size={13} /> Live on TAC · Telegram ready</div>
                 <h1>Call it. <span className="grad">Stake it.</span> Win the pool.</h1>
-                <p>Peer-to-peer prediction pools with on-chain transparency, XP levels, achievements and a live leaderboard. No house — winners split losers' stakes.</p>
+                <p>Peer-to-peer prediction markets for the TON / TAC stack. Stake YES or NO, climb ranks, cash out winners. No house edge — just the pool.</p>
                 <div className="hero-stats">
                   <div className="stat"><CircleDollarSign className="stat-ico" size={18} /><span className="v"><CountUp value={parseFloat(ethers.formatEther(totalVol))} /> TAC</span><span className="l">Volume</span></div>
                   <div className="stat"><Activity className="stat-ico" size={18} /><span className="v"><CountUp value={activeCount} dp={0} /></span><span className="l">Live Markets</span></div>
@@ -1463,6 +1463,11 @@ export default function App() {
                       <h3>{m.question}</h3>
                       {hist.length > 1 && !isExp && <Sparkline points={hist} />}
                     </div>
+                    <div className="ch-odds" aria-label={`YES ${o.y} percent`}>
+                      <span className="odds-yes">{o.y}%</span>
+                      <span className="odds-lbl">YES</span>
+                      <span className="odds-no">NO {o.n}%</span>
+                    </div>
                     <div className="ch-meta">
                       <span><CircleDollarSign size={12} /> {fmt(m.totalYesPool + m.totalNoPool)} TAC</span>
                       <span><Users size={12} /> {m.yesBettors + m.noBettors}</span>
@@ -1486,6 +1491,33 @@ export default function App() {
                       <span className="pn">NO {o.n}%</span>
                     </div>
                   </div>
+
+                  {open && !isExp && (
+                    <div className="quick-trade" onClick={e => e.stopPropagation()}>
+                      {!account ? (
+                        <button className="qt-connect" onClick={connectWallet}>
+                          <Wallet size={15} /> Connect to trade
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            className="qt-yes"
+                            disabled={!!busy[`bet-${m.id}`] || m.mySide === SIDE.No}
+                            onClick={() => { setExpanded(m.id); setTradeMode({ ...tradeMode, [m.id]: "buy" }); bet(m.id, 1); tgHaptic("medium"); }}
+                          >
+                            YES <small>{(100 / Math.max(1, o.y)).toFixed(2)}x</small>
+                          </button>
+                          <button
+                            className="qt-no"
+                            disabled={!!busy[`bet-${m.id}`] || m.mySide === SIDE.Yes}
+                            onClick={() => { setExpanded(m.id); setTradeMode({ ...tradeMode, [m.id]: "buy" }); bet(m.id, 2); tgHaptic("medium"); }}
+                          >
+                            NO <small>{(100 / Math.max(1, o.n)).toFixed(2)}x</small>
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
 
                   {isExp && (
                     <div className="card-body">
@@ -1926,6 +1958,29 @@ export default function App() {
         <span className="f-brand">Prediction<b>Tac</b></span>
         <span className="f-sub">Prediction pools on <a href="https://tac.build" target="_blank" rel="noreferrer">TAC</a> · {NOT_DEPLOYED ? "contract not deployed" : `${CONTRACT_ADDRESS.slice(0, 8)}…`} · fee {protocolFee / 10}% · 3d dispute window · <TrendingUp size={11} /> no house edge</span>
       </footer>
+
+      <nav className="bottom-nav" aria-label="Primary">
+        <button type="button" className={view === "home" ? "on" : ""} onClick={() => { setView("home"); tgHaptic("light"); }}>
+          <Home size={20} strokeWidth={view === "home" ? 2.4 : 1.8} />
+          Home
+        </button>
+        <button type="button" className={view === "markets" ? "on" : ""} onClick={() => { setView("markets"); tgHaptic("light"); }}>
+          <BarChart3 size={20} strokeWidth={view === "markets" ? 2.4 : 1.8} />
+          Markets
+        </button>
+        <button type="button" className={view === "vault" ? "on" : ""} onClick={() => { setView("vault"); tgHaptic("light"); }}>
+          <Landmark size={20} strokeWidth={view === "vault" ? 2.4 : 1.8} />
+          Vault
+        </button>
+        <button type="button" className={view === "portfolio" ? "on" : ""} onClick={() => { setView("portfolio"); tgHaptic("light"); }}>
+          <User size={20} strokeWidth={view === "portfolio" ? 2.4 : 1.8} />
+          You
+        </button>
+        <button type="button" className={view === "leaderboard" ? "on" : ""} onClick={() => { setView("leaderboard"); tgHaptic("light"); }}>
+          <Trophy size={20} strokeWidth={view === "leaderboard" ? 2.4 : 1.8} />
+          Rank
+        </button>
+      </nav>
     </div>
   );
 }
