@@ -32,6 +32,7 @@ export function WalletModal({
         <p className="wm-sub">
           Network: <b>{networkName}</b>
           {inTelegram ? " · Telegram Mini App detected" : ""}
+          {" · "}use the SPB chip in the nav to change networks
         </p>
 
         {connected && (

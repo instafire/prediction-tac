@@ -3289,3 +3289,49 @@ button.acct {
 .wm-status span { color: var(--dim); font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; font-size: 10px; }
 .wm-status code { font-family: var(--mono); font-size: 11.5px; word-break: break-all; color: var(--fg); }
 .wm-disc { width: 100%; margin: 4px 0 8px; }
+
+.net-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 10px; min-height: 36px;
+  border-radius: 999px;
+  font-size: 11px; font-weight: 800;
+  font-family: var(--mono);
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  background: rgba(0,0,0,0.2);
+  transition: border-color 0.15s, color 0.15s;
+}
+.net-chip:hover { color: var(--fg); border-color: var(--border-hi); }
+.net-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--dim);
+}
+.net-dot.testnet { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.net-dot.mainnet { background: var(--yes); box-shadow: 0 0 0 3px var(--yes-dim); }
+.net-dot.local { background: var(--gold); box-shadow: 0 0 0 3px rgba(240,193,75,0.15); }
+
+.net-pick { display: flex; flex-direction: column; gap: 8px; }
+.net-opt {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  padding: 12px 14px; border-radius: 12px; text-align: left;
+  border: 1px solid var(--border); background: rgba(0,0,0,0.18);
+}
+.net-opt b { font-size: 13px; }
+.net-opt small { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.net-opt.on {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: var(--accent-dim);
+}
+.sa-toast {
+  position: fixed; bottom: calc(var(--bottom-h) + 12px + var(--safe-b)); left: 50%;
+  transform: translateX(-50%); z-index: 90;
+  padding: 8px 12px; border-radius: 999px;
+  font-size: 11px; font-family: var(--mono); color: var(--accent);
+  background: var(--card); border: 1px solid var(--border-hi);
+  box-shadow: var(--shadow);
+  max-width: 92vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+@media (min-width: 900px) {
+  .sa-toast { bottom: 20px; }
+}

@@ -7,7 +7,7 @@ import {
   CircleDollarSign, Users, Eye, Scale, PartyPopper, Gauge, X,
   Search, ArrowUpDown, Bookmark, Link2, Palette, Home, User, Settings,
   Calculator, HelpCircle, Bell, Download, Share2, WifiOff, History,
-  Volume2, Vibrate, Moon
+  Volume2, Vibrate, Moon, ExternalLink
 } from "lucide-react";
 import abi from "./abi.json";
 import "./App.css";
@@ -557,6 +557,8 @@ export default function App() {
   const [walletKind, setWalletKind] = useState<"evm" | "ton" | "demo" | null>(null);
   const [walletModal, setWalletModal] = useState(false);
   const [walletBusy, setWalletBusy] = useState<string | null>(null);
+  const [smartAccount, setSmartAccount] = useState("");
+  const tonNotified = useRef(false);
   const [readProvider] = useState(() => new ethers.JsonRpcProvider(TAC_RPC));
   const [markets, setMarkets] = useState<Market[]>([]);
   const [vaultBalance, setVaultBalance] = useState<bigint>(0n);
@@ -954,36 +956,76 @@ export default function App() {
 
   async function disconnectWallet() {
     try { await tonConnectUI.disconnect(); } catch { /* noop */ }
+    try {
+      const { closeTacSdk } = await import("./lib/tacSdk");
+      await closeTacSdk();
+    } catch { /* noop */ }
     setAccount("");
     setSigner(null);
     setTonAddress("");
+    setSmartAccount("");
     setWalletKind(null);
     setVaultBalance(0n);
     setWalletBalance(0n);
     setIsOwner(false);
+    tonNotified.current = false;
     notify("Wallet disconnected");
   }
 
-  // Sync TON Connect session → app state
+  function switchNetwork(chain: ChainKey) {
+    const net = NETWORKS[chain];
+    const cfg: RuntimeConfig = {
+      ...loadRuntimeConfig(),
+      chain,
+      rpc: net.rpc,
+    };
+    // keep contract if same chain type; clear for local↔remote switch is safer for demo
+    if (chain === "local" || CHAIN_PREF === "local") {
+      // user can re-set in admin
+    }
+    saveRuntimeConfig(cfg);
+    notify(`Switching to ${net.name}…`);
+    setTimeout(() => window.location.reload(), 600);
+  }
+
+  // Sync TON Connect session → app state + optional TAC smart account
   useEffect(() => {
     if (!tonWallet) {
       if (walletKind === "ton") {
         setTonAddress("");
-        // keep EVM if separately connected
+        setSmartAccount("");
+        tonNotified.current = false;
       }
       return;
     }
     const raw = tonWallet.account?.address || "";
     setTonAddress(raw);
-    setWalletKind(prev => prev === "evm" ? "evm" : "ton");
+    setWalletKind(prev => (prev === "evm" ? "evm" : "ton"));
     setWalletModal(false);
-    // Friendly short form for display if no EVM yet
-    if (!account && raw) {
-      // Don't set invalid EVM account; show TON-only mode
-      setChainOk(true);
+    setChainOk(true);
+
+    if (!tonNotified.current) {
+      tonNotified.current = true;
       showConnectionPulse();
       notify("Telegram / TON wallet connected ⚡");
     }
+
+    // Resolve TAC EVM smart account for this TON wallet when we have a dApp contract
+    void (async () => {
+      if (!raw || NOT_DEPLOYED) return;
+      try {
+        const { resolveTacSmartAccount } = await import("./lib/tacSdk");
+        const sa = await resolveTacSmartAccount(CHAIN_PREF, raw, CONTRACT_ADDRESS);
+        if (sa && ethers.isAddress(sa)) {
+          setSmartAccount(sa);
+          // Use SA for read-only portfolio when no MetaMask account
+          setAccount(prev => (prev && walletKind === "evm" ? prev : sa));
+        }
+      } catch (e) {
+        console.warn("TAC SA resolve skipped", e);
+      }
+    })();
+
     // If Telegram wallet also injected ethereum, link EVM quietly
     if (window.ethereum) {
       void (async () => {
@@ -997,7 +1039,7 @@ export default function App() {
             setAccount(accs[0]);
             setWalletKind("evm");
           }
-        } catch { /* TON-only is fine for now */ }
+        } catch { /* TON-only is fine */ }
       })();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1811,6 +1853,19 @@ export default function App() {
               🔥 <b>{streak.count}</b>
             </span>
           )}
+          <button
+            type="button"
+            className="net-chip"
+            title={`Network: ${ACTIVE_CHAIN_NAME} — click to cycle`}
+            onClick={() => {
+              const order: ChainKey[] = ["testnet", "mainnet", "local"];
+              const i = order.indexOf(CHAIN_PREF);
+              switchNetwork(order[(i + 1) % order.length]);
+            }}
+          >
+            <span className={`net-dot ${CHAIN_PREF}`} />
+            {CHAIN_PREF === "testnet" ? "SPB" : CHAIN_PREF === "mainnet" ? "Main" : "Local"}
+          </button>
           {account && <span className="vault-chip" onClick={() => setView("vault")}><Landmark size={13} /> {fmt(vaultBalance)}</span>}
           {(account || tonAddress) ? (
             <button
@@ -1849,6 +1904,9 @@ export default function App() {
         evmAccount={account || undefined}
         tonAccount={tonAddress || undefined}
       />
+      {walletModal && smartAccount && (
+        <div className="sa-toast" role="status">TAC smart account: {smartAccount.slice(0, 8)}…{smartAccount.slice(-6)}</div>
+      )}
 
       {markets.length > 0 && view !== "home" && (
         <div className="ticker">
@@ -2651,6 +2709,24 @@ export default function App() {
                   </button>
                 ))}
               </div>
+            </div>
+            <div className="set-card">
+              <h4><Link2 size={15} /> Network</h4>
+              <p className="set-note">Switch TAC network (reloads). Testnet = Saint Petersburg SPB.</p>
+              <div className="net-pick">
+                {(["testnet", "mainnet", "local"] as ChainKey[]).map(k => (
+                  <button key={k} type="button" className={`net-opt ${CHAIN_PREF === k ? "on" : ""}`} onClick={() => switchNetwork(k)}>
+                    <b>{NETWORKS[k].name}</b>
+                    <small>chain {NETWORKS[k].chainId}</small>
+                  </button>
+                ))}
+              </div>
+              {NET.faucet && (
+                <a className="wm-faucet" href={NET.faucet} target="_blank" rel="noreferrer">Testnet faucet <ExternalLink size={12} /></a>
+              )}
+              {EXPLORER && (
+                <a className="wm-faucet" href={EXPLORER} target="_blank" rel="noreferrer">Explorer <ExternalLink size={12} /></a>
+              )}
             </div>
             <div className="set-card">
               <h4><Calculator size={15} /> Tools</h4>
