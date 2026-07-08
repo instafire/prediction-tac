@@ -11,13 +11,16 @@ import {
 } from "lucide-react";
 import abi from "./abi.json";
 import "./App.css";
+import { useTonConnectUI, useTonWallet } from "@tonconnect/ui-react";
 import { BrandMark, CatArt, EmptyMarketsArt, EmptyVaultArt, HeroChartArt, LoadingSkeleton } from "./graphics";
 import { loadPrefs, savePrefs, type Prefs } from "./lib/prefs";
 import { playSound } from "./lib/sounds";
 import { loadJournal, pushJournal, clearJournal, type TxEntry } from "./lib/txJournal";
+import { NETWORKS, resolveChainKey, type ChainKey } from "./lib/networks";
+import { WalletModal } from "./wallet/WalletModal";
 
 // ─── Runtime config (admin-settable, overrides build-time env) ───
-interface RuntimeConfig { contract?: string; rpc?: string; chain?: "mainnet" | "testnet" | "local" }
+interface RuntimeConfig { contract?: string; rpc?: string; chain?: ChainKey }
 function loadRuntimeConfig(): RuntimeConfig {
   try {
     const raw = JSON.parse(localStorage.getItem("ptac-config") || "{}");
@@ -34,17 +37,13 @@ const RT_CONFIG = loadRuntimeConfig();
 const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
 const ENV_CONTRACT = (import.meta.env.VITE_CONTRACT_ADDRESS as string) || ZERO_ADDR;
 const CONTRACT_ADDRESS = (RT_CONFIG.contract && ethers.isAddress(RT_CONFIG.contract) ? RT_CONFIG.contract : ENV_CONTRACT);
-const ENV_CHAIN = ((import.meta.env.VITE_CHAIN as string) || "").toLowerCase();
-const CHAIN_PREF = RT_CONFIG.chain || (ENV_CHAIN === "local" || ENV_CHAIN === "testnet" || ENV_CHAIN === "mainnet" ? ENV_CHAIN as RuntimeConfig["chain"] : "mainnet");
-const TAC_RPC = RT_CONFIG.rpc
-  || (import.meta.env.VITE_TAC_RPC as string)
-  || (CHAIN_PREF === "local" ? "http://127.0.0.1:8545" : "https://rpc.tac.build");
-const TAC_CHAIN_ID = "0xEF";
-const TAC_CHAIN_ID_TESTNET = "0x957";
-const LOCAL_CHAIN_ID = "0x7A69"; // 31337 Anvil
-const ACTIVE_CHAIN = CHAIN_PREF === "local" ? LOCAL_CHAIN_ID : CHAIN_PREF === "testnet" ? TAC_CHAIN_ID_TESTNET : TAC_CHAIN_ID;
-const ACTIVE_CHAIN_NAME = CHAIN_PREF === "local" ? "Local Anvil" : CHAIN_PREF === "testnet" ? "TAC Testnet" : "TAC Mainnet";
-const NATIVE_SYMBOL = CHAIN_PREF === "local" ? "ETH" : "TAC";
+const ENV_CHAIN = (import.meta.env.VITE_CHAIN as string) || "";
+const CHAIN_PREF: ChainKey = resolveChainKey(RT_CONFIG.chain || ENV_CHAIN || "testnet");
+const NET = NETWORKS[CHAIN_PREF];
+const TAC_RPC = RT_CONFIG.rpc || (import.meta.env.VITE_TAC_RPC as string) || NET.rpc;
+const ACTIVE_CHAIN = NET.chainIdHex;
+const ACTIVE_CHAIN_NAME = NET.name;
+const EXPLORER = NET.explorer;
 const NOT_DEPLOYED = CONTRACT_ADDRESS === ZERO_ADDR;
 
 const CATEGORIES = ["crypto", "politics", "sports", "tech", "culture", "misc"] as const;
@@ -550,8 +549,14 @@ function CommandPalette({ open, onClose, items }: { open: boolean; onClose: () =
 }
 
 export default function App() {
+  const [tonConnectUI] = useTonConnectUI();
+  const tonWallet = useTonWallet();
   const [signer, setSigner] = useState<ethers.JsonRpcSigner | null>(null);
   const [account, setAccount] = useState("");
+  const [tonAddress, setTonAddress] = useState("");
+  const [walletKind, setWalletKind] = useState<"evm" | "ton" | "demo" | null>(null);
+  const [walletModal, setWalletModal] = useState(false);
+  const [walletBusy, setWalletBusy] = useState<string | null>(null);
   const [readProvider] = useState(() => new ethers.JsonRpcProvider(TAC_RPC));
   const [markets, setMarkets] = useState<Market[]>([]);
   const [vaultBalance, setVaultBalance] = useState<bigint>(0n);
@@ -628,7 +633,7 @@ export default function App() {
   const [configDraft, setConfigDraft] = useState<RuntimeConfig>(() => ({
     contract: RT_CONFIG.contract || (NOT_DEPLOYED ? "" : CONTRACT_ADDRESS),
     rpc: RT_CONFIG.rpc || TAC_RPC,
-    chain: RT_CONFIG.chain || "mainnet",
+    chain: CHAIN_PREF,
   }));
   const deepLinked = useRef(false);
   const demoSeeded = useRef(false);
@@ -850,43 +855,153 @@ export default function App() {
     requestAnimationFrame(() => document.getElementById(`mk-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }));
   }, [markets]);
 
-  async function connectWallet() {
+  function openConnect() {
     if (NOT_DEPLOYED) {
-      const demoAddr = "0xDE300000000000000000000000000000000000AC";
-      setAccount(demoAddr);
-      setVaultBalance(ethers.parseEther("500"));
-      setWalletBalance(ethers.parseEther("1250"));
-      setStats({ marketsCreated: 1, betsPlaced: 6, wins: 2, losses: 1, totalStaked: ethers.parseEther("310"), totalWon: ethers.parseEther("395") });
-      setIsOwner(true);
-      showConnectionPulse();
-      notify("Demo wallet connected — trades are simulated ⚡");
+      // still offer demo + real wallets for testnet prep
+      setWalletModal(true);
       return;
     }
-    if (!window.ethereum) { notify("No EVM wallet found. Install MetaMask.", true); return }
-    try {
-      const p = new ethers.BrowserProvider(window.ethereum);
-      await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: ACTIVE_CHAIN }] })
-        .catch(async () => {
-          await window.ethereum.request({
-            method: "wallet_addEthereumChain",
-            params: [{
-              chainId: ACTIVE_CHAIN,
-              chainName: ACTIVE_CHAIN_NAME,
-              rpcUrls: [TAC_RPC],
-              nativeCurrency: { name: NATIVE_SYMBOL, symbol: NATIVE_SYMBOL, decimals: 18 },
-              blockExplorerUrls: CHAIN_PREF === "local" ? [] : ["https://explorer.tac.build"],
-            }],
-          });
+    setWalletModal(true);
+  }
+
+  async function ensureEvmChain() {
+    if (!window.ethereum) throw new Error("No EVM wallet found. Install MetaMask or open Telegram Wallet with TAC support.");
+    await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: ACTIVE_CHAIN }] })
+      .catch(async () => {
+        await window.ethereum.request({
+          method: "wallet_addEthereumChain",
+          params: [{
+            chainId: ACTIVE_CHAIN,
+            chainName: ACTIVE_CHAIN_NAME,
+            rpcUrls: [TAC_RPC],
+            nativeCurrency: { name: NET.currency.name, symbol: NET.currency.symbol, decimals: 18 },
+            blockExplorerUrls: EXPLORER ? [EXPLORER] : [],
+          }],
         });
+      });
+  }
+
+  async function connectEvmWallet() {
+    setWalletBusy("evm");
+    try {
+      if (NOT_DEPLOYED) {
+        // Live RPC without contract still allows chain connect for testing
+      }
+      if (!window.ethereum) {
+        notify("No EVM wallet detected. Use MetaMask, or Telegram Wallet if it injects EVM.", true);
+        return;
+      }
+      await ensureEvmChain();
+      const p = new ethers.BrowserProvider(window.ethereum);
       const accs = await p.send("eth_requestAccounts", []);
       const s = await p.getSigner();
-      setSigner(s); setAccount(accs[0]);
-      showConnectionPulse();
-      notify(CHAIN_PREF === "local" ? "Wallet connected to Local Anvil ⚡" : "Wallet connected ⚡");
+      setSigner(s);
+      setAccount(accs[0]);
+      setWalletKind("evm");
       const cid = await window.ethereum.request({ method: "eth_chainId" });
-      setChainOk(cid === ACTIVE_CHAIN || cid === TAC_CHAIN_ID_TESTNET || cid === LOCAL_CHAIN_ID);
-    } catch (e: any) { notify(e?.shortMessage || e?.message || "Connection failed", true) }
+      setChainOk(String(cid).toLowerCase() === ACTIVE_CHAIN.toLowerCase());
+      showConnectionPulse();
+      notify(`EVM wallet on ${ACTIVE_CHAIN_NAME} ⚡`);
+      setWalletModal(false);
+    } catch (e: any) {
+      notify(e?.shortMessage || e?.message || "EVM connection failed", true);
+    } finally {
+      setWalletBusy(null);
+    }
   }
+
+  async function connectTelegramWallet() {
+    setWalletBusy("ton");
+    try {
+      // Prefer Telegram-injected EVM if present (some TG wallets)
+      if (window.ethereum && IN_TELEGRAM) {
+        try {
+          await connectEvmWallet();
+          if (account || window.ethereum.selectedAddress) {
+            setWalletKind("evm");
+            return;
+          }
+        } catch { /* fall through to TON Connect */ }
+      }
+      await tonConnectUI.openModal();
+      // tonWallet state updates via hook; also read immediately after modal flow
+    } catch (e: any) {
+      notify(e?.message || "TON Connect failed", true);
+    } finally {
+      setWalletBusy(null);
+    }
+  }
+
+  function connectDemoWallet() {
+    const demoAddr = "0xDE300000000000000000000000000000000000AC";
+    setAccount(demoAddr);
+    setSigner(null);
+    setWalletKind("demo");
+    setVaultBalance(ethers.parseEther("500"));
+    setWalletBalance(ethers.parseEther("1250"));
+    setStats({ marketsCreated: 1, betsPlaced: 6, wins: 2, losses: 1, totalStaked: ethers.parseEther("310"), totalWon: ethers.parseEther("395") });
+    setIsOwner(true);
+    setChainOk(true);
+    showConnectionPulse();
+    notify("Demo wallet connected — trades are simulated ⚡");
+    setWalletModal(false);
+  }
+
+  /** Legacy entry used across UI buttons */
+  async function connectWallet() {
+    openConnect();
+  }
+
+  async function disconnectWallet() {
+    try { await tonConnectUI.disconnect(); } catch { /* noop */ }
+    setAccount("");
+    setSigner(null);
+    setTonAddress("");
+    setWalletKind(null);
+    setVaultBalance(0n);
+    setWalletBalance(0n);
+    setIsOwner(false);
+    notify("Wallet disconnected");
+  }
+
+  // Sync TON Connect session → app state
+  useEffect(() => {
+    if (!tonWallet) {
+      if (walletKind === "ton") {
+        setTonAddress("");
+        // keep EVM if separately connected
+      }
+      return;
+    }
+    const raw = tonWallet.account?.address || "";
+    setTonAddress(raw);
+    setWalletKind(prev => prev === "evm" ? "evm" : "ton");
+    setWalletModal(false);
+    // Friendly short form for display if no EVM yet
+    if (!account && raw) {
+      // Don't set invalid EVM account; show TON-only mode
+      setChainOk(true);
+      showConnectionPulse();
+      notify("Telegram / TON wallet connected ⚡");
+    }
+    // If Telegram wallet also injected ethereum, link EVM quietly
+    if (window.ethereum) {
+      void (async () => {
+        try {
+          await ensureEvmChain();
+          const p = new ethers.BrowserProvider(window.ethereum);
+          const accs = await p.send("eth_requestAccounts", []);
+          if (accs[0]) {
+            const s = await p.getSigner();
+            setSigner(s);
+            setAccount(accs[0]);
+            setWalletKind("evm");
+          }
+        } catch { /* TON-only is fine for now */ }
+      })();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tonWallet]);
 
   const loadAll = useCallback(async () => {
     if (NOT_DEPLOYED) {
@@ -1697,13 +1812,43 @@ export default function App() {
             </span>
           )}
           {account && <span className="vault-chip" onClick={() => setView("vault")}><Landmark size={13} /> {fmt(vaultBalance)}</span>}
-          {account ? (
-            <span className={`acct ${NOT_DEPLOYED ? "demo" : ""}`} title={NOT_DEPLOYED ? "Demo wallet — trades are simulated locally" : account}><span className={`acct-dot ${chainOk ? "" : "bad"}`} />{NOT_DEPLOYED ? "demo·" : ""}{account.slice(0, 6)}…{account.slice(-4)}</span>
+          {(account || tonAddress) ? (
+            <button
+              type="button"
+              className={`acct ${walletKind === "demo" || NOT_DEPLOYED ? "demo" : ""} ${walletKind === "ton" ? "ton" : ""}`}
+              title={account || tonAddress}
+              onClick={() => setWalletModal(true)}
+            >
+              <span className={`acct-dot ${chainOk ? "" : "bad"}`} />
+              {walletKind === "demo" ? "demo·" : walletKind === "ton" && !account ? "ton·" : ""}
+              {account
+                ? `${account.slice(0, 6)}…${account.slice(-4)}`
+                : tonAddress
+                  ? `${tonAddress.slice(0, 4)}…${tonAddress.slice(-4)}`
+                  : "connected"}
+            </button>
           ) : (
-            <button className="btn-connect" onClick={connectWallet}><Wallet size={15} /> Connect</button>
+            <button className="btn-connect" onClick={openConnect}><Wallet size={15} /> Connect</button>
           )}
         </div>
       </nav>
+
+      <WalletModal
+        open={walletModal}
+        onClose={() => setWalletModal(false)}
+        onEvm={connectEvmWallet}
+        onTelegram={connectTelegramWallet}
+        onDemo={NOT_DEPLOYED ? connectDemoWallet : undefined}
+        onDisconnect={() => { void disconnectWallet(); setWalletModal(false); }}
+        showDemo={NOT_DEPLOYED}
+        connected={!!(account || tonAddress)}
+        busy={walletBusy}
+        networkName={ACTIVE_CHAIN_NAME}
+        faucetUrl={NET.faucet}
+        inTelegram={IN_TELEGRAM}
+        evmAccount={account || undefined}
+        tonAccount={tonAddress || undefined}
+      />
 
       {markets.length > 0 && view !== "home" && (
         <div className="ticker">
@@ -2617,10 +2762,10 @@ export default function App() {
                     {configDraft.rpc && !isValidRpc(configDraft.rpc) && <em className="lc-err">Must be an http(s):// URL</em>}
                   </label>
                   <label>Network
-                    <select value={configDraft.chain || "mainnet"} onChange={e => setConfigDraft({ ...configDraft, chain: e.target.value as "mainnet" | "testnet" | "local" })}>
-                      <option value="mainnet">TAC Mainnet (chain 239 / 0xEF)</option>
-                      <option value="testnet">TAC Testnet (chain 2391 / 0x957)</option>
-                      <option value="local">Local Anvil (chain 31337 / 0x7A69)</option>
+                    <select value={configDraft.chain || CHAIN_PREF} onChange={e => setConfigDraft({ ...configDraft, chain: e.target.value as ChainKey })}>
+                      <option value="testnet">TAC SPB Testnet (2391) — recommended for testing</option>
+                      <option value="mainnet">TAC Mainnet (239)</option>
+                      <option value="local">Local Anvil (31337)</option>
                     </select>
                   </label>
                 </div>

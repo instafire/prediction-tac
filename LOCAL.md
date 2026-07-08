@@ -1,15 +1,44 @@
-# Local testing (Anvil + Vite)
+# Local & TAC Testnet
 
-## Currently running (this session)
+## Wallets
+
+| Button | What it does |
+|--------|----------------|
+| **Telegram / TON Wallet** | TON Connect (Wallet in Telegram, Tonkeeper, …) |
+| **EVM wallet (TAC)** | MetaMask / injected — needed for vault txs on TAC EVM |
+| **Demo** | Simulated wallet when no contract is deployed |
+
+TON Connect uses `public/tonconnect-manifest.json`. Production hosts should serve that file over HTTPS.
+
+## TAC Saint Petersburg Testnet (default)
+
+| | |
+|--|--|
+| RPC | `https://spb.rpc.tac.build` |
+| Chain ID | `2391` (`0x957`) |
+| Explorer | https://spb.explorer.tac.build |
+| Faucet | https://spb.faucet.tac.build |
+| Frontend env | `VITE_CHAIN=testnet` |
+
+Deploy contract to testnet (needs funded key):
+
+```powershell
+$env:Path = "$env:USERPROFILE\.foundry\bin;$env:Path"
+cd "D:\Projects\Prediction Tac\tac-prediction-pool"
+# put PRIVATE_KEY in .env
+forge script script/DeployV3.s.sol:DeployV3 --rpc-url https://spb.rpc.tac.build --broadcast
+```
+
+Then set `VITE_CONTRACT_ADDRESS` in `frontend/.env` and rebuild.
+
+## Local Anvil (optional)
 
 | Service | URL / value |
 |---------|-------------|
 | **App** | http://127.0.0.1:5173/ |
 | **Anvil RPC** | http://127.0.0.1:8545 |
 | **Chain ID** | 31337 (`0x7A69`) |
-| **Contract** | `0x5FbDB2315678afecb367f032d93F642f64180aa3` |
-| **Owner / funded account** | `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` |
-| **Vault seeded** | 500 ETH deposited; 50 used to create market #1 |
+| **Contract** | `0x5FbDB2315678afecb367f032d93F642f64180aa3` (after local deploy) |
 
 ## MetaMask setup
 
