@@ -2004,6 +2004,29 @@ export default function App() {
             {NOT_DEPLOYED && <div className="demo-banner">🔧 Demo mode — contract not deployed yet. All UI is live; transactions enable once the contract address is set in the Admin panel.</div>}
           </header>
 
+          {/* Pixlet / Tronbyt-style LED marquee strip */}
+          <div className="pixlet-strip" aria-hidden>
+            <span className="px-label">● LIVE</span>
+            <div className="px-marquee">
+              <div className="px-track">
+                {[...markets, ...markets].slice(0, 16).map((m, i) => {
+                  const o = odds(m.totalYesPool, m.totalNoPool);
+                  const multi = (m.outcomeCount || 2) > 2;
+                  const pools = m.outcomePools || [m.totalYesPool, m.totalNoPool];
+                  const lead = multi ? multiOdds(pools)[0] : o.y;
+                  return (
+                    <span key={`px-${m.id}-${i}`}>
+                      {m.question.slice(0, 36)}{m.question.length > 36 ? "…" : ""}{" "}
+                      <b>{multi ? `${lead}%` : `Y ${o.y}%`}</b>{" "}
+                      {!multi && <em>N {o.n}%</em>}
+                    </span>
+                  );
+                })}
+                {markets.length === 0 && <span>WAITING FOR MARKETS · PREDICTION TAC · PIXEL MODE</span>}
+              </div>
+            </div>
+          </div>
+
           {trending.length > 0 && (
             <section className="trending">
               <h3><Flame size={16} /> Trending</h3>
