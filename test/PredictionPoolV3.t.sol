@@ -21,9 +21,12 @@ contract PredictionPoolV3Test is Test {
         vm.deal(carol, 100_000 ether);
         vm.deal(dave, 100_000 ether);
 
-        vm.prank(alice); pool.deposit{value: 10_000 ether}();
-        vm.prank(bob); pool.deposit{value: 10_000 ether}();
-        vm.prank(carol); pool.deposit{value: 10_000 ether}();
+        vm.prank(alice);
+        pool.deposit{value: 10_000 ether}();
+        vm.prank(bob);
+        pool.deposit{value: 10_000 ether}();
+        vm.prank(carol);
+        pool.deposit{value: 10_000 ether}();
     }
 
     function _createMarket() internal returns (uint256) {
@@ -41,7 +44,7 @@ contract PredictionPoolV3Test is Test {
 
     function test_DepositViaReceive() public {
         vm.prank(dave);
-        (bool s, ) = address(pool).call{value: 100 ether}("");
+        (bool s,) = address(pool).call{value: 100 ether}("");
         assertTrue(s);
         assertEq(pool.vaultBalance(dave), 100 ether);
     }
@@ -78,7 +81,7 @@ contract PredictionPoolV3Test is Test {
         uint256 id = _createMarket();
         assertEq(id, 1);
         assertEq(pool.vaultBalance(alice), 9_900 ether);
-        (address creator, string memory q, , , , , , uint256 yes, uint256 no, , , uint32 yb, ) = pool.getMarketInfo(1);
+        (address creator, string memory q,,,,,, uint256 yes, uint256 no,,, uint32 yb,) = pool.getMarketInfo(1);
         assertEq(creator, alice);
         assertEq(q, "Will TAC hit $1?");
         assertEq(yes, 100 ether);
@@ -116,7 +119,7 @@ contract PredictionPoolV3Test is Test {
         pool.bet(1, PredictionPoolV3.Side.No, 50 ether);
 
         uint256 net = 50 ether - (50 ether * 20 / 1000);
-        (, , , , , , , , uint256 noPool, , , , uint32 nb) = pool.getMarketInfo(1);
+        (,,,,,,,, uint256 noPool,,,, uint32 nb) = pool.getMarketInfo(1);
         assertEq(noPool, net);
         assertEq(nb, 1);
         assertEq(pool.vaultBalance(bob), 10_000 ether - 50 ether);
@@ -138,7 +141,7 @@ contract PredictionPoolV3Test is Test {
         pool.bet(1, PredictionPoolV3.Side.No, 30 ether);
         vm.stopPrank();
 
-        (, uint256 amount, ) = pool.getUserBet(1, bob);
+        (, uint256 amount,) = pool.getUserBet(1, bob);
         uint256 net = 80 ether - (80 ether * 20 / 1000);
         assertEq(amount, net);
     }
@@ -164,9 +167,9 @@ contract PredictionPoolV3Test is Test {
 
         uint256 exitFee = 40 ether * 20 / 1000;
         assertEq(pool.vaultBalance(bob), vaultBefore + 40 ether - exitFee);
-        (, uint256 amount, ) = pool.getUserBet(1, bob);
+        (, uint256 amount,) = pool.getUserBet(1, bob);
         assertEq(amount, net - 40 ether);
-        (, , , , , , , , uint256 noPool, , , , uint32 nb) = pool.getMarketInfo(1);
+        (,,,,,,,, uint256 noPool,,,, uint32 nb) = pool.getMarketInfo(1);
         assertEq(noPool, net - 40 ether);
         assertEq(nb, 1);
     }
@@ -180,16 +183,16 @@ contract PredictionPoolV3Test is Test {
         vm.prank(bob);
         pool.sellPosition(1, net);
 
-        (PredictionPoolV3.Side side, uint256 amount, ) = pool.getUserBet(1, bob);
+        (PredictionPoolV3.Side side, uint256 amount,) = pool.getUserBet(1, bob);
         assertEq(uint8(side), uint8(PredictionPoolV3.Side.None));
         assertEq(amount, 0);
-        (, , , , , , , , uint256 noPool, , , , uint32 nb) = pool.getMarketInfo(1);
+        (,,,,,,,, uint256 noPool,,,, uint32 nb) = pool.getMarketInfo(1);
         assertEq(noPool, 0);
         assertEq(nb, 0);
 
         vm.prank(bob);
         pool.bet(1, PredictionPoolV3.Side.Yes, 50 ether);
-        (PredictionPoolV3.Side side2, , ) = pool.getUserBet(1, bob);
+        (PredictionPoolV3.Side side2,,) = pool.getUserBet(1, bob);
         assertEq(uint8(side2), uint8(PredictionPoolV3.Side.Yes));
     }
 
@@ -226,7 +229,7 @@ contract PredictionPoolV3Test is Test {
         uint256 net = 500 ether - (500 ether * 20 / 1000);
         vm.prank(bob);
         pool.sellPosition(1, net / 2);
-        (bool solvent, , ) = pool.solvencyCheck();
+        (bool solvent,,) = pool.solvencyCheck();
         assertTrue(solvent);
     }
 
@@ -410,7 +413,7 @@ contract PredictionPoolV3Test is Test {
         _createMarket();
         vm.prank(bob);
         pool.bet(1, PredictionPoolV3.Side.No, 100 ether);
-        (bool solvent, , ) = pool.solvencyCheck();
+        (bool solvent,,) = pool.solvencyCheck();
         assertTrue(solvent);
     }
 

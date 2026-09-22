@@ -38,8 +38,12 @@ Peer-to-peer prediction market dApp for the TAC blockchain (EVM layer connected 
 - All new styles at hero section + end of App.css (`.palette-*`, `.payout-preview`/`.pp-*`); all use theme variables so 4 palettes adapt automatically.
 
 ## Hosting
-- Served as user service `tac-prediction-pool` (svc_vaSGCNDC6eg) → https://tac-prediction-pool-delhi.zocomputer.io (static `dist/` via python http.server on port 8741, `serve.py`). After frontend changes: `bun run build`, then restart the service.
-- Canonical/OG URLs in `index.html`, `public/sitemap.xml`, `public/robots.txt` point at tac-prediction-pool-delhi.zocomputer.io.
+- Live via Cloudflare Tunnel from this machine → `serve_prod.py` (serves static `dist/`, binds 127.0.0.1 only):
+  - PUBLIC: https://tac.chaty.lol → 127.0.0.1:8791 (`run-public.cmd`, ADMIN=0).
+  - ADMIN: https://tac-admin.chaty.lol → 127.0.0.1:8792 (`run-admin.cmd`, ADMIN=1, HTTP Basic Auth from `admin-auth.json`).
+- `serve_prod.py` serves `/app-config.json` fresh from `deploy-config.json` each request, so runtime config (contract/rpc/chain) goes live on server restart with no rebuild.
+- After frontend changes: `bun run build` (or `npm run build`), then restart the server(s). Static files are re-read per request so a rebuild alone updates HTML/assets; a **restart is only needed for CSP/Python changes** in `serve_prod.py`.
+- Canonical/OG URLs in `index.html`, `public/sitemap.xml`, `public/robots.txt`, and `public/tonconnect-manifest.json` point at https://tac.chaty.lol.
 
 ## Round 4 — Security audit + UI polish (July 2026, delhi)
 - Re-hosted on this machine (previous host was bunda). Foundry reinstalled at /root/.foundry/bin; all 59 tests pass.
@@ -77,7 +81,7 @@ TAC refs: https://docs.tac.build/sdk/overview · chain id 239 (0xEF), testnet 23
 - Social share: `og.png` + `og.jpg` (1200×630) rendered from an SVG art board (headline "Call it. Stake it. Win the pool.", chart line, YES/NO chips). Rebuild by editing the SVG and re-running rsvg-convert.
 - PWA: `site.webmanifest` (name, theme #0b0b14, icons). `robots.txt` + `sitemap.xml` also in `public/`.
 - `index.html` has full meta: description, keywords, canonical, Open Graph (og:image absolute URL to the hosted service), Twitter summary_large_image card, theme-color, manifest link.
-- Canonical/OG URLs point at https://tac-prediction-pool-bunda.zocomputer.io — update if domain changes.
+- Canonical/OG URLs point at https://tac.chaty.lol — update if domain changes.
 - Brand copies in `Images/prediction-tac/` (logo.svg, og.png, icon-512.png) for the user.
 
 ## Round 5 — desktop card alignment + mobile/Telegram compact layout (July 2026)

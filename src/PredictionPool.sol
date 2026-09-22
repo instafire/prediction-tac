@@ -20,8 +20,18 @@ contract PredictionPool is Ownable, ReentrancyGuard, Pausable {
     uint256 public accumulatedFees;
     uint256 public marketCount;
 
-    enum Side { None, Yes, No }
-    enum Status { Open, Resolved, Disputed, Cancelled, Refunded }
+    enum Side {
+        None,
+        Yes,
+        No
+    }
+    enum Status {
+        Open,
+        Resolved,
+        Disputed,
+        Cancelled,
+        Refunded
+    }
 
     struct Market {
         address creator;
@@ -53,20 +63,9 @@ contract PredictionPool is Ownable, ReentrancyGuard, Pausable {
         uint256 timestamp
     );
 
-    event BetPlaced(
-        uint256 indexed marketId,
-        address indexed bettor,
-        Side side,
-        uint256 amount,
-        uint256 timestamp
-    );
+    event BetPlaced(uint256 indexed marketId, address indexed bettor, Side side, uint256 amount, uint256 timestamp);
 
-    event MarketResolved(
-        uint256 indexed marketId,
-        Side winner,
-        uint256 totalPool,
-        uint256 timestamp
-    );
+    event MarketResolved(uint256 indexed marketId, Side winner, uint256 totalPool, uint256 timestamp);
 
     event MarketDisputed(uint256 indexed marketId, address indexed disputer, uint256 timestamp);
 
@@ -74,12 +73,7 @@ contract PredictionPool is Ownable, ReentrancyGuard, Pausable {
 
     event MarketRefunded(uint256 indexed marketId, uint256 timestamp);
 
-    event Claimed(
-        uint256 indexed marketId,
-        address indexed claimant,
-        uint256 amount,
-        uint256 timestamp
-    );
+    event Claimed(uint256 indexed marketId, address indexed claimant, uint256 amount, uint256 timestamp);
 
     event FeesWithdrawn(address indexed to, uint256 amount);
 
@@ -99,13 +93,7 @@ contract PredictionPool is Ownable, ReentrancyGuard, Pausable {
         string calldata description,
         string calldata category,
         uint256 resolutionTime
-    )
-        external
-        payable
-        nonReentrant
-        notPaused
-        returns (uint256)
-    {
+    ) external payable nonReentrant notPaused returns (uint256) {
         require(bytes(question).length > 0, "Empty question");
         require(msg.value >= MIN_STAKE, "Stake below minimum");
         require(resolutionTime > block.timestamp, "Resolution in past");
@@ -137,10 +125,7 @@ contract PredictionPool is Ownable, ReentrancyGuard, Pausable {
         require(block.timestamp < m.resolutionTime, "Market expired");
         require(msg.value >= MIN_STAKE, "Stake below minimum");
         require(side == Side.Yes || side == Side.No, "Invalid side");
-        require(
-            m.side[msg.sender] == Side.None || m.side[msg.sender] == side,
-            "Already on a side"
-        );
+        require(m.side[msg.sender] == Side.None || m.side[msg.sender] == side, "Already on a side");
 
         m.side[msg.sender] = side;
 
@@ -192,10 +177,7 @@ contract PredictionPool is Ownable, ReentrancyGuard, Pausable {
         Market storage m = markets[marketId];
         require(m.status == Status.Resolved, "Not resolved");
         require(block.timestamp < m.resolvedAt + DISPUTE_WINDOW, "Dispute window closed");
-        require(
-            m.side[msg.sender] != Side.None,
-            "Not a participant"
-        );
+        require(m.side[msg.sender] != Side.None, "Not a participant");
 
         m.status = Status.Disputed;
         emit MarketDisputed(marketId, msg.sender, block.timestamp);
@@ -228,7 +210,7 @@ contract PredictionPool is Ownable, ReentrancyGuard, Pausable {
         m.totalYesPool = 0;
         m.hasClaimed[m.creator] = true;
 
-        (bool sent, ) = payable(m.creator).call{value: refund}("");
+        (bool sent,) = payable(m.creator).call{value: refund}("");
         require(sent, "Refund failed");
 
         emit MarketCancelled(marketId, block.timestamp);
@@ -258,7 +240,7 @@ contract PredictionPool is Ownable, ReentrancyGuard, Pausable {
         m.hasClaimed[msg.sender] = true;
         uint256 amount = m.amounts[msg.sender];
 
-        (bool sent, ) = payable(msg.sender).call{value: amount}("");
+        (bool sent,) = payable(msg.sender).call{value: amount}("");
         require(sent, "Transfer failed");
 
         emit Claimed(marketId, msg.sender, amount, block.timestamp);
@@ -281,7 +263,7 @@ contract PredictionPool is Ownable, ReentrancyGuard, Pausable {
 
         uint256 share = (m.amounts[msg.sender] * totalPool) / winnerPool;
 
-        (bool sent, ) = payable(msg.sender).call{value: share}("");
+        (bool sent,) = payable(msg.sender).call{value: share}("");
         require(sent, "Transfer failed");
 
         emit Claimed(marketId, msg.sender, share, block.timestamp);
@@ -331,11 +313,7 @@ contract PredictionPool is Ownable, ReentrancyGuard, Pausable {
         return (m.side[user], m.amounts[user], m.hasClaimed[user]);
     }
 
-    function getOdds(uint256 marketId)
-        external
-        view
-        returns (uint256 yesPercent, uint256 noPercent)
-    {
+    function getOdds(uint256 marketId) external view returns (uint256 yesPercent, uint256 noPercent) {
         Market storage m = markets[marketId];
         uint256 total = m.totalYesPool + m.totalNoPool;
         if (total == 0) return (500, 500);
@@ -343,11 +321,7 @@ contract PredictionPool is Ownable, ReentrancyGuard, Pausable {
         noPercent = 1000 - yesPercent;
     }
 
-    function getPotentialPayout(uint256 marketId, address user)
-        external
-        view
-        returns (uint256 ifYes, uint256 ifNo)
-    {
+    function getPotentialPayout(uint256 marketId, address user) external view returns (uint256 ifYes, uint256 ifNo) {
         Market storage m = markets[marketId];
         uint256 userAmt = m.amounts[user];
         if (userAmt == 0) return (0, 0);
@@ -393,7 +367,7 @@ contract PredictionPool is Ownable, ReentrancyGuard, Pausable {
         require(to != address(0), "Invalid address");
         uint256 amount = accumulatedFees;
         accumulatedFees = 0;
-        (bool sent, ) = payable(to).call{value: amount}("");
+        (bool sent,) = payable(to).call{value: amount}("");
         require(sent, "Transfer failed");
         emit FeesWithdrawn(to, amount);
     }

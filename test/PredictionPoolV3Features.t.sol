@@ -17,9 +17,12 @@ contract PredictionPoolV3FeaturesTest is Test {
         vm.deal(alice, 100_000 ether);
         vm.deal(bob, 100_000 ether);
         vm.deal(carol, 100_000 ether);
-        vm.prank(alice); pool.deposit{value: 10_000 ether}();
-        vm.prank(bob); pool.deposit{value: 10_000 ether}();
-        vm.prank(carol); pool.deposit{value: 10_000 ether}();
+        vm.prank(alice);
+        pool.deposit{value: 10_000 ether}();
+        vm.prank(bob);
+        pool.deposit{value: 10_000 ether}();
+        vm.prank(carol);
+        pool.deposit{value: 10_000 ether}();
     }
 
     function test_ClaimMany() public {
@@ -178,7 +181,8 @@ contract PredictionPoolV3FeaturesTest is Test {
         outcomes[1] = "B";
         outcomes[2] = "C";
         vm.prank(alice);
-        uint256 id = pool.createMultiMarket("Who?", "d", "sports", "src", uint64(block.timestamp + 3 days), 100 ether, outcomes);
+        uint256 id =
+            pool.createMultiMarket("Who?", "d", "sports", "src", uint64(block.timestamp + 3 days), 100 ether, outcomes);
         vm.prank(bob);
         pool.betOutcome(id, 1, 50 ether);
         uint256 before = pool.vaultBalance(bob);
@@ -194,7 +198,8 @@ contract PredictionPoolV3FeaturesTest is Test {
         outcomes[1] = "B";
         outcomes[2] = "C";
         vm.prank(alice);
-        uint256 id = pool.createMultiMarket("Who?", "d", "sports", "src", uint64(block.timestamp + 2 days), 50 ether, outcomes);
+        uint256 id =
+            pool.createMultiMarket("Who?", "d", "sports", "src", uint64(block.timestamp + 2 days), 50 ether, outcomes);
         vm.prank(bob);
         pool.betOutcome(id, 1, 50 ether);
 

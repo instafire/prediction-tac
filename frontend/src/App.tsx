@@ -4,7 +4,7 @@ import {
   TrendingUp, Trophy, Flame, Zap, Wallet, BarChart3, Shield, Clock,
   ChevronDown, Sparkles, Target, Award, Crown, Medal, Star, Activity,
   ArrowUpRight, ArrowDownRight, RefreshCw, Plus, Pause, Play, Landmark,
-  CircleDollarSign, Users, Eye, Scale, PartyPopper, Gauge, X,
+  CircleDollarSign, Users, Scale, PartyPopper, Gauge, X,
   Search, ArrowUpDown, Bookmark, Link2, Palette, Home, User, Settings,
   Calculator, HelpCircle, Bell, Download, Share2, WifiOff, History,
   Volume2, Vibrate, Moon, ExternalLink
@@ -23,8 +23,13 @@ import {
 } from "./lib/safe";
 import { WalletModal } from "./wallet/WalletModal";
 
-// ─── Runtime config (admin-settable, overrides build-time env) ───
+// ─── Runtime config ───
+// Precedence: server config (/app-config.json → window.__APP_CONFIG__, set in
+// main.tsx before this module loads) > localStorage (per-browser admin preview)
+// > build-time env. The server config is what makes the site go live for
+// everyone: fill in deploy-config.json and restart serve_prod.py.
 interface RuntimeConfig { contract?: string; rpc?: string; chain?: ChainKey }
+interface ServerConfig { contract?: string; rpc?: string; chain?: ChainKey; admin?: boolean }
 function loadRuntimeConfig(): RuntimeConfig {
   const raw = safeJsonParse<unknown>(safeLocalGet("ptac-config"), {});
   return typeof raw === "object" && raw !== null ? (raw as RuntimeConfig) : {};
@@ -32,25 +37,43 @@ function loadRuntimeConfig(): RuntimeConfig {
 function saveRuntimeConfig(cfg: RuntimeConfig) {
   safeLocalSet("ptac-config", JSON.stringify(cfg));
 }
+const SERVER_CONFIG: ServerConfig =
+  (typeof window !== "undefined" && (window as unknown as { __APP_CONFIG__?: ServerConfig }).__APP_CONFIG__) || {};
 const RT_CONFIG = loadRuntimeConfig();
 const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
 const ENV_CONTRACT = (import.meta.env.VITE_CONTRACT_ADDRESS as string) || ZERO_ADDR;
-const CONTRACT_ADDRESS = (RT_CONFIG.contract && ethers.isAddress(RT_CONFIG.contract) ? RT_CONFIG.contract : ENV_CONTRACT);
+const CONTRACT_ADDRESS =
+  (SERVER_CONFIG.contract && ethers.isAddress(SERVER_CONFIG.contract) ? SERVER_CONFIG.contract : "")
+  || (RT_CONFIG.contract && ethers.isAddress(RT_CONFIG.contract) ? RT_CONFIG.contract : "")
+  || ENV_CONTRACT;
 const ENV_CHAIN = (import.meta.env.VITE_CHAIN as string) || "";
-const CHAIN_PREF: ChainKey = resolveChainKey(RT_CONFIG.chain || ENV_CHAIN || "testnet");
+const CHAIN_PREF: ChainKey = resolveChainKey(SERVER_CONFIG.chain || RT_CONFIG.chain || ENV_CHAIN || "testnet");
 const NET = NETWORKS[CHAIN_PREF];
-const TAC_RPC = RT_CONFIG.rpc || (import.meta.env.VITE_TAC_RPC as string) || NET.rpc;
+// Re-validate any persisted/served RPC (not just when saved) so a malformed or
+// non-http(s) value can never become the provider URL.
+const TAC_RPC = (SERVER_CONFIG.rpc && isValidRpc(SERVER_CONFIG.rpc) ? SERVER_CONFIG.rpc : "")
+  || (RT_CONFIG.rpc && isValidRpc(RT_CONFIG.rpc) ? RT_CONFIG.rpc : "")
+  || (import.meta.env.VITE_TAC_RPC as string) || NET.rpc;
 const ACTIVE_CHAIN = NET.chainIdHex;
 const ACTIVE_CHAIN_NAME = NET.name;
 const EXPLORER = NET.explorer;
 const NOT_DEPLOYED = CONTRACT_ADDRESS === ZERO_ADDR;
+// The admin surface is only exposed when the server marks this response as the
+// admin host (serve_prod.py ADMIN=1 behind HTTP Basic Auth), or in local dev.
+// The public site never renders admin. On-chain onlyOwner still guards actions.
+const ADMIN_MODE = !!SERVER_CONFIG.admin || !!import.meta.env.DEV;
+// Cap how many of the most-recent markets the client pulls per refresh so RPC
+// usage stays bounded as the market count grows. The connected user's own
+// markets are always loaded on top of this (see loadAll), so positions never
+// drop off the UI regardless of age.
+const MAX_MARKETS_LOAD = 80;
 
 const CATEGORIES = ["crypto", "politics", "sports", "tech", "culture", "misc"] as const;
 const CAT_ICONS: Record<string, string> = { crypto: "₿", politics: "🏛", sports: "⚽", tech: "🚀", culture: "🎬", misc: "🎲" };
 const CAT_LABEL: Record<string, string> = { crypto: "Crypto", politics: "Politics", sports: "Sports", tech: "Tech", culture: "Culture", misc: "Misc" };
 const DURATIONS: Record<string, number> = { "1 day": 1, "3 days": 3, "7 days": 7, "14 days": 14, "30 days": 30, "90 days": 90 };
 const FAQ_ITEMS: { q: string; a: string }[] = [
-  { q: "How do payouts work?", a: "Pari-mutuel pools: winners split the losing side pro-rata after a protocol fee on profit. Your stake returns plus your share of the other side." },
+  { q: "How do payouts work?", a: "Pari-mutuel pools: a protocol fee is taken from each bet up front, and your net stake joins the pool. Winners get their net stake back plus a pro-rata share of the losing side — no extra fee at claim." },
   { q: "What is the vault?", a: "Deposit TAC once into the on-chain vault. Bets pull from your vault balance so you skip per-trade wallet confirms for every click." },
   { q: "Can I exit early?", a: "Yes. Sell returns face-value stake (minus fee) to your vault and removes liquidity from that side. Odds shift when you exit." },
   { q: "How is resolution fair?", a: "Owner resolves after deadline. Bettors get a 3-day dispute window. One-sided expired markets can be refunded by anyone." },
@@ -234,8 +257,31 @@ function buildDemoData(nowSec: number) {
     myOutcomeIndex: -1,
     winnerOutcome: 0,
   };
+  // Expired multi-outcome market awaiting an admin result (demo of multi resolution).
+  const multiEnded: Market = {
+    id: 13, creator: "0xd3a0000000000000000000000000000000000001",
+    question: "Which team won the regional finals?",
+    description: "Resolves to the official bracket winner. Ended — awaiting result verification by the team.",
+    category: "sports",
+    resolutionTime: nowSec - 9 * 3600,
+    createdAt: nowSec - 240 * 3600,
+    totalYesPool: 0n, totalNoPool: 0n, status: STATUS.Open, winner: SIDE.None,
+    yesBettors: 0, noBettors: 0, mySide: SIDE.None, myAmount: 0n, myClaimed: false, potYes: 0n, potNo: 0n,
+    resolutionSource: "https://example.com/tournament-bracket",
+    outcomeCount: 3,
+    outcomeLabels: ["Team Aurora", "Team Vortex", "Team Nimbus"],
+    outcomePools: [E("1400"), E("2100"), E("900")],
+    outcomeBettors: [16, 23, 11],
+    myOutcomeIndex: -1,
+    winnerOutcome: 0,
+  };
   const markets: Market[] = [
     multi,
+    multiEnded,
+    // Expired binary market, both sides funded → admin resolves YES/NO (demo user holds YES).
+    mk(12, "Did BTC close above $125k on the last day of the month?", "Coinbase BTC-USD daily close, UTC. Ended — needs an on-chain result.", "crypto", -5, "2200", "1800", 31, 27, STATUS.Open, SIDE.None, SIDE.Yes, "60", "Coinbase BTC-USD"),
+    // Disputed market awaiting a final ruling (demo of dispute settlement).
+    mk(11, "Was the product launch on schedule?", "Resolved from the official announcement — a bettor has disputed the result.", "tech", -60, "700", "1300", 12, 20, STATUS.Disputed, SIDE.No, SIDE.No, "80", "https://example.com/launch"),
     mk(9, "Will TAC hit a new all-time-high volume this month?", "Resolves YES if TAC daily DEX volume sets a new record before month end (source: tac.build analytics).", "crypto", 96, "4200", "2800", 34, 21, STATUS.Open, SIDE.None, SIDE.Yes, "120", "https://tac.build/analytics"),
     mk(8, "Will BTC close above $120k this Friday?", "Based on Coinbase BTC-USD daily close, UTC.", "crypto", 30, "1850", "2400", 28, 33, STATUS.Open, SIDE.None, SIDE.No, "40", "Coinbase BTC-USD"),
     mk(7, "Will a Telegram Mini App pass 100M MAU this quarter?", "Any TON-ecosystem mini app; official Telegram or project announcements count.", "tech", 41, "980", "1420", 17, 22, STATUS.Open, SIDE.None, SIDE.None, "0", "Telegram / project blogs"),
@@ -341,47 +387,105 @@ function CountUp({ value, suffix = "", dp = 1 }: { value: number; suffix?: strin
   return <>{display.toLocaleString(undefined, { maximumFractionDigits: dp })}{suffix}</>;
 }
 
+// Fixed viewBox + preserveAspectRatio="none": the line/area/gridlines stretch to
+// fill the width (a full, uninterrupted stroke). We deliberately do NOT resize
+// the viewBox from a measured value — doing so corrupts the stroke raster in
+// Blink (half-painted line). Axis labels are HTML overlays so they never get
+// stretched, and the end dot is a round-capped zero-length path so it stays a
+// perfect circle regardless of the horizontal scale.
+// Turn a computed "rgb(r, g, b)" (or rgba) color into rgba with a given alpha.
+function withAlpha(color: string, a: number): string {
+  const m = color.match(/(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)/);
+  return m ? `rgba(${m[1]}, ${m[2]}, ${m[3]}, ${a})` : color;
+}
+
+// ProbChart renders to <canvas>. An equivalent SVG stroke half-paints in Blink
+// inside the expandable card (a rasterization bug we could not beat with any
+// SVG creation strategy); canvas uses a different pipeline and is reliable.
 function ProbChart({ points, height = 120 }: { points: PricePoint[]; height?: number }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const plotRef = useRef<HTMLDivElement>(null);
+  const ys = points.map(p => p.yes);
+  const last = ys.length ? ys[ys.length - 1] : 0;
+  const up = ys.length >= 2 ? last >= ys[0] : true;
+  const cls = up ? "spark-up" : "spark-down";
+  const h = height, pad = 10;
+  useEffect(() => {
+    const canvas = canvasRef.current, plot = plotRef.current;
+    if (!canvas || !plot || points.length < 2) return;
+    const draw = () => {
+      const w = Math.round(plot.clientWidth);
+      if (w <= 0) return;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+      canvas.style.width = "100%";
+      canvas.style.height = `${h}px`;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      const color = (getComputedStyle(canvas).color || "").trim() || (up ? "#2ee6a8" : "#ff5c6a");
+      const padL = 34;
+      const ts = points.map(p => p.t);
+      const minT = Math.min(...ts), maxT = Math.max(...ts) || minT + 1;
+      const X = (t: number) => padL + ((t - minT) / Math.max(1, maxT - minT)) * (w - padL - pad);
+      const Y = (v: number) => h - pad - (v / 100) * (h - pad * 2);
+      // gridlines
+      ctx.lineWidth = 1;
+      for (const g of [25, 50, 75]) {
+        ctx.strokeStyle = g === 50 ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.06)";
+        ctx.setLineDash(g === 50 ? [3, 3] : []);
+        ctx.beginPath(); ctx.moveTo(padL, Y(g)); ctx.lineTo(w - pad, Y(g)); ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      const pts = points.map(p => [X(p.t), Y(p.yes)] as const);
+      const trace = () => {
+        ctx.moveTo(pts[0][0], pts[0][1]);
+        for (let i = 1; i < pts.length; i++) {
+          const [px, py] = pts[i - 1], [cx, cy] = pts[i];
+          const mx = (px + cx) / 2;
+          ctx.bezierCurveTo(mx, py, mx, cy, cx, cy);
+        }
+      };
+      // area fill
+      const grad = ctx.createLinearGradient(0, pad, 0, h - pad);
+      grad.addColorStop(0, withAlpha(color, 0.22));
+      grad.addColorStop(1, withAlpha(color, 0));
+      ctx.beginPath(); trace();
+      ctx.lineTo(pts[pts.length - 1][0], h - pad);
+      ctx.lineTo(pts[0][0], h - pad);
+      ctx.closePath();
+      ctx.fillStyle = grad; ctx.fill();
+      // line + glow
+      ctx.beginPath(); trace();
+      ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.lineJoin = "round"; ctx.lineCap = "round";
+      ctx.shadowColor = color; ctx.shadowBlur = 4;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      // end dot
+      const [lx, ly] = pts[pts.length - 1];
+      ctx.beginPath(); ctx.arc(lx, ly, 4, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
+    };
+    draw();
+    const ro = new ResizeObserver(draw);
+    ro.observe(plot);
+    return () => ro.disconnect();
+  }, [points, h, up]);
   if (points.length < 2) return (
     <div className="chart-empty" style={{ height }}>
       <Activity size={16} /> Price history builds as bets come in
     </div>
   );
-  const w = 600, h = height, pad = 10, padL = 34;
-  const ts = points.map(p => p.t), ys = points.map(p => p.yes);
-  const minT = Math.min(...ts), maxT = Math.max(...ts) || minT + 1;
-  const x = (t: number) => padL + ((t - minT) / Math.max(1, maxT - minT)) * (w - padL - pad);
-  const y = (v: number) => h - pad - (v / 100) * (h - pad * 2);
-  const pts = points.map(p => [x(p.t), y(p.yes)] as const);
-  let path = `M${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}`;
-  for (let i = 1; i < pts.length; i++) {
-    const [px, py] = pts[i - 1], [cx, cy] = pts[i];
-    const mx = (px + cx) / 2;
-    path += ` C${mx.toFixed(1)},${py.toFixed(1)} ${mx.toFixed(1)},${cy.toFixed(1)} ${cx.toFixed(1)},${cy.toFixed(1)}`;
-  }
-  const last = ys[ys.length - 1], first = ys[0];
-  const up = last >= first;
-  const cls = up ? "spark-up" : "spark-down";
-  const area = `${path} L${pts[pts.length - 1][0].toFixed(1)},${h - pad} L${pts[0][0].toFixed(1)},${h - pad} Z`;
+  const ylabel = (v: number) => h - pad - (v / 100) * (h - pad * 2);
   return (
     <div className="chart-wrap">
-      <svg viewBox={`0 0 ${w} ${h}`} className={`prob-chart ${cls}`} preserveAspectRatio="none">
-        <defs>
-          <linearGradient id="chartFill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="currentColor" stopOpacity="0.22" />
-            <stop offset="100%" stopColor="currentColor" stopOpacity="0" />
-          </linearGradient>
-        </defs>
-        {[25, 50, 75].map(g => (
-          <g key={g}>
-            <line x1={padL} y1={y(g)} x2={w - pad} y2={y(g)} className={`chart-grid ${g === 50 ? "mid" : ""}`} />
-            <text x={padL - 6} y={y(g) + 3} className="chart-tick" textAnchor="end">{g}%</text>
-          </g>
+      <div className="chart-plot" ref={plotRef} style={{ height: h }}>
+        <canvas ref={canvasRef} className={`prob-chart ${cls}`} />
+        {[75, 50, 25].map(v => (
+          <span key={v} className="chart-ylabel" style={{ top: ylabel(v) }}>{v}%</span>
         ))}
-        <path d={area} fill="url(#chartFill)" stroke="none" />
-        <path d={path} fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" className="chart-line" />
-        <circle cx={pts[pts.length - 1][0]} cy={y(last)} r="4" fill="currentColor" className="chart-dot" />
-      </svg>
+      </div>
       <div className="chart-labels">
         <span className={up ? "up" : "down"}>{up ? <ArrowUpRight size={13} /> : <ArrowDownRight size={13} />} YES {last.toFixed(1)}%</span>
         <span className="chart-range">{points.length} trades</span>
@@ -392,6 +496,7 @@ function ProbChart({ points, height = 120 }: { points: PricePoint[]; height?: nu
 
 function Sparkline({ points }: { points: PricePoint[] }) {
   if (points.length < 2) return null;
+  // Fixed viewBox stretched to fill (no measured resize → full, unbroken line).
   const w = 320, h = 64, pad = 6;
   const ts = points.map(p => p.t);
   const minT = Math.min(...ts), maxT = Math.max(...ts) || minT + 1;
@@ -418,7 +523,7 @@ function Sparkline({ points }: { points: PricePoint[] }) {
       </defs>
       <path d={area} fill={`url(#${gid})`} stroke="none" />
       <path d={path} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
-      <circle cx={ex} cy={ey} r="3" fill="currentColor" />
+      <path d={`M${ex.toFixed(1)},${ey.toFixed(1)} L${ex.toFixed(1)},${ey.toFixed(1)}`} stroke="currentColor" strokeWidth="6" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
     </svg>
   );
 }
@@ -442,15 +547,17 @@ function PayoutPreview({ amount, yesPool, noPool, feeBp }: { amount: string; yes
   if (!amt || amt <= 0 || !isFinite(amt)) return null;
   const stake = ethers.parseEther(String(amt));
   const est = (side: 1 | 2) => {
-    const my = stake;
-    const winPool = (side === 1 ? yesPool : noPool) + my;
+    // Contract charges the protocol fee on the stake up-front; only the net
+    // stake joins the pool, and there is no fee at claim. Pools passed in are
+    // already net amounts, so mirror that math here.
+    const feeOnStake = stake * BigInt(feeBp) / 1000n;
+    const myNet = stake - feeOnStake;
+    const winPool = (side === 1 ? yesPool : noPool) + myNet;
     const losePool = side === 1 ? noPool : yesPool;
     if (winPool === 0n) return { payout: 0, mult: 0 };
-    const gross = my + (losePool * my) / winPool;
-    const fee = (gross - my) * BigInt(feeBp) / 1000n;
-    const net = gross - fee;
-    const payout = parseFloat(ethers.formatEther(net));
-    return { payout, mult: payout / amt };
+    const payout = myNet + (losePool * myNet) / winPool;
+    const payoutF = parseFloat(ethers.formatEther(payout));
+    return { payout: payoutF, mult: payoutF / amt };
   };
   const y = est(1), n = est(2);
   return (
@@ -460,7 +567,7 @@ function PayoutPreview({ amount, yesPool, noPool, feeBp }: { amount: string; yes
         <span className="pp-yes">YES pays <b>{y.payout.toFixed(2)}</b> TAC <small>({y.mult.toFixed(2)}x)</small></span>
         <span className="pp-no">NO pays <b>{n.payout.toFixed(2)}</b> TAC <small>({n.mult.toFixed(2)}x)</small></span>
       </div>
-      <span className="pp-note">Estimates shift as others bet · fee {feeBp / 10}% on winnings</span>
+      <span className="pp-note">Estimates shift as others bet · fee {feeBp / 10}% taken per bet</span>
     </div>
   );
 }
@@ -578,7 +685,7 @@ export default function App() {
   const [priceHistory, setPriceHistory] = useState<Record<number, PricePoint[]>>({});
   const [leaders, setLeaders] = useState<Leader[]>([]);
   const [loading, setLoading] = useState(false);
-  const [view, setView] = useState<"home" | "markets" | "vault" | "portfolio" | "leaderboard" | "admin" | "settings" | "tools">("home");
+  const [view, setView] = useState<"home" | "markets" | "vault" | "portfolio" | "leaderboard" | "admin" | "settings" | "tools">(ADMIN_MODE ? "admin" : "home");
   const [theme, setTheme] = useState<string>(() => safeLocalGet("ptac-theme") || "midnight");
   const [prefs, setPrefs] = useState<Prefs>(() => loadPrefs());
   const [journal, setJournal] = useState<TxEntry[]>(() => loadJournal());
@@ -643,7 +750,12 @@ export default function App() {
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   const [adminFee, setAdminFee] = useState("20");
   const [feeRecipient, setFeeRecipient] = useState("");
-  const [adminMode, setAdminMode] = useState<"overview" | "launch" | "contract" | "ops">("overview");
+  const [adminMode, setAdminMode] = useState<"overview" | "pools" | "protocol" | "launch">("overview");
+  const [adminPoolFilter, setAdminPoolFilter] = useState<"action" | "disputed" | "open" | "resolved" | "all">("action");
+  const [adminSearch, setAdminSearch] = useState("");
+  const [adminPick, setAdminPick] = useState<Record<number, number>>({});
+  const [newOwner, setNewOwner] = useState("");
+  const [pendingOwner, setPendingOwner] = useState("");
   const [configDraft, setConfigDraft] = useState<RuntimeConfig>(() => ({
     contract: RT_CONFIG.contract || (NOT_DEPLOYED ? "" : CONTRACT_ADDRESS),
     rpc: RT_CONFIG.rpc || TAC_RPC,
@@ -733,18 +845,18 @@ export default function App() {
     } catch { /* noop */ }
   }, [view]);
 
-  function notify(m: string, isErr = false) {
+  const notify = useCallback((m: string, isErr = false) => {
     if (isErr) { setErr(m); setToast("") } else { setToast(m); setErr("") }
     tgHaptic(isErr ? "error" : "light");
     playSound(isErr ? "error" : "tap", prefs.sounds);
     setTimeout(() => { setToast(""); setErr("") }, 4000);
-  }
-  function fireConfetti() {
+  }, [prefs.sounds]);
+  const fireConfetti = useCallback(() => {
     setSuccessAnimation("ripple");
     tgHaptic("success");
     playSound("success", prefs.sounds);
     setTimeout(() => setSuccessAnimation(null), 2000);
-  }
+  }, [prefs.sounds]);
 
   function showMoneyRain() {
     setSuccessAnimation("money");
@@ -1083,7 +1195,15 @@ export default function App() {
           c.balanceOf(acc), readProvider.getBalance(acc), c.owner(), c.getUserStats(acc), c.isSolvent(),
         ]);
         setVaultBalance(vb); setWalletBalance(wb);
-        setIsOwner(ownerAddr.toLowerCase() === acc);
+        const owns = ownerAddr.toLowerCase() === acc;
+        setIsOwner(owns);
+        if (owns) {
+          // Surface any pending Ownable2Step transfer (best-effort; older ABIs may lack it).
+          try {
+            const po: string = await c.pendingOwner();
+            setPendingOwner(po && po !== ZERO_ADDR ? po : "");
+          } catch { /* pendingOwner unavailable */ }
+        }
         setStats({
           marketsCreated: Number(st.marketsCreated), betsPlaced: Number(st.betsPlaced),
           wins: Number(st.wins), losses: Number(st.losses),
@@ -1093,13 +1213,24 @@ export default function App() {
       }
 
       const total = Number(count);
-      const ids = Array.from({ length: total }, (_, i) => i + 1);
+      // Load the most-recent MAX_MARKETS_LOAD markets, plus every market the
+      // connected user participated in (so their positions always show). This
+      // keeps per-refresh RPC usage bounded instead of scaling with all markets.
+      const startId = Math.max(1, total - MAX_MARKETS_LOAD + 1);
+      const idSet = new Set<number>();
+      for (let i = startId; i <= total; i++) idSet.add(i);
+      if (acc) {
+        try {
+          const mine: bigint[] = await c.getUserMarkets(acc);
+          for (const b of mine) { const n = Number(b); if (n >= 1 && n <= total) idSet.add(n); }
+        } catch { /* best-effort — fall back to the recent window */ }
+      }
+      const ids = Array.from(idSet).sort((a, b) => a - b);
       const infos = await Promise.all(ids.map(i => c.getMarketInfo(i)));
       const metas = await Promise.all(ids.map(i => c.getMarketMeta(i).catch(() => null)));
       const multis = await Promise.all(ids.map(i => c.getMultiMarket(i).catch(() => null)));
       const bets = acc ? await Promise.all(ids.map(i => c.getUserBet(i, acc).catch(() => null))) : [];
       const multiBets = acc ? await Promise.all(ids.map(i => c.getUserMultiBet(i, acc).catch(() => null))) : [];
-      const pots = acc ? await Promise.all(ids.map(i => c.getPotentialPayout(i, acc).catch(() => null))) : [];
 
       // Index comments from events
       try {
@@ -1124,7 +1255,7 @@ export default function App() {
       } catch { /* best-effort */ }
 
       const out: Market[] = ids.map((id, idx) => {
-        const m = infos[idx], ub = bets[idx], pp = pots[idx], meta = metas[idx], multi = multis[idx], mb = multiBets[idx];
+        const m = infos[idx], ub = bets[idx], meta = metas[idx], multi = multis[idx], mb = multiBets[idx];
         const oc = meta ? Number(meta.outcomeCount || 2) : 2;
         const labels: string[] = multi ? [...multi.labels] : ["YES", "NO"];
         const pools: bigint[] = multi ? multi.pools.map((p: bigint) => p) : [m.totalYesPool, m.totalNoPool];
@@ -1133,6 +1264,17 @@ export default function App() {
         if (mb && Number(mb.outcomeIndex) !== 255) myOutcomeIndex = Number(mb.outcomeIndex);
         else if (ub && Number(ub.side) === 1) myOutcomeIndex = 0;
         else if (ub && Number(ub.side) === 2) myOutcomeIndex = 1;
+        // Derive potential payout client-side (mirrors the contract's
+        // getPotentialPayout) to avoid an extra per-market RPC call.
+        const myAmt: bigint = ub ? ub.amount : 0n;
+        const yesPool: bigint = m.totalYesPool;
+        const noPool: bigint = m.totalNoPool;
+        const totalPool: bigint = yesPool + noPool;
+        let potYes = 0n, potNo = 0n;
+        if (myAmt > 0n && ub) {
+          if (Number(ub.side) === 1 && yesPool > 0n) potYes = (myAmt * totalPool) / yesPool;
+          else if (Number(ub.side) === 2 && noPool > 0n) potNo = (myAmt * totalPool) / noPool;
+        }
         return {
           id, creator: m.creator, question: m.question, description: m.description,
           category: m.category, resolutionTime: Number(m.resolutionTime), createdAt: Number(m.createdAt),
@@ -1140,7 +1282,7 @@ export default function App() {
           status: Number(m.status), winner: Number(m.winner),
           yesBettors: Number(m.yesBettors), noBettors: Number(m.noBettors),
           mySide: ub ? Number(ub.side) : 0, myAmount: ub ? ub.amount : (mb ? mb.amount : 0n), myClaimed: ub ? ub.claimed : (mb ? mb.claimed : false),
-          potYes: pp ? pp.ifYes : 0n, potNo: pp ? pp.ifNo : 0n,
+          potYes, potNo,
           resolutionSource: meta ? String(meta.resolutionSource || "") : "",
           outcomeCount: oc,
           outcomeLabels: labels,
@@ -1214,7 +1356,7 @@ export default function App() {
     } catch (e: any) {
       notify(e?.shortMessage || e?.message || "Failed to load", true);
     } finally { setLoading(false) }
-  }, [account, contract, readProvider]);
+  }, [account, contract, readProvider, notify]);
 
   useEffect(() => { loadAll() }, [loadAll]);
   useEffect(() => {
@@ -1262,7 +1404,7 @@ export default function App() {
         return () => window.clearTimeout(t);
       }
     }
-  }, [unlocked]);
+  }, [unlocked, fireConfetti]);
 
   async function tx(key: string, fn: () => Promise<{ wait: () => Promise<unknown> } | null>, okMsg: string, celebrate = false) {
     if (NOT_DEPLOYED) {
@@ -1541,13 +1683,78 @@ export default function App() {
   const claim = (id: number) => tx(`claim-${id}`, () => contract(true).claim(id), "Winnings claimed → vault 💰", true);
   const claimRefund = (id: number) => tx(`refund-${id}`, () => contract(true).claimRefund(id), "Refund claimed → vault");
   const cancelM = (id: number) => tx(`cancel-${id}`, () => contract(true).cancelMarket(id), "Market cancelled — stake refunded");
-  const refundExpired = (id: number) => tx(`rexp-${id}`, () => contract(true).refundExpiredMarket(id), "Marked for refund");
   const disputeM = (id: number) => tx(`disp-${id}`, () => contract(true).dispute(id), "Dispute raised ⚖️");
-  const adminResolve = (id: number, side: 1 | 2) => tx(`ares-${id}`, () => contract(true).resolve(id, side), `#${id} resolved ${side === 1 ? "YES" : "NO"}`);
-  const adminResolveDispute = (id: number, side: 1 | 2) => tx(`adis-${id}`, () => contract(true).resolveDispute(id, side), `Dispute #${id} settled`);
-  const adminSetFee = () => tx("afee", () => contract(true).setProtocolFee(parseInt(adminFee)), "Fee updated");
-  const adminWithdrawFees = () => tx("awd", () => contract(true).withdrawFees(feeRecipient || account), "Fees withdrawn");
-  const adminPause = () => tx("apause", () => contract(true).setPaused(!paused), paused ? "Unpaused" : "Paused");
+
+  // ── Demo-mode local mutations so the admin panel is fully testable pre-launch ──
+  const demoResolveMarket = (id: number, winnerOutcome: number) => {
+    setMarkets(ms => ms.map(m => {
+      if (m.id !== id) return m;
+      const isMulti = (m.outcomeCount || 2) > 2;
+      return {
+        ...m,
+        status: STATUS.Resolved,
+        winnerOutcome,
+        winner: isMulti ? m.winner : (winnerOutcome === 0 ? SIDE.Yes : SIDE.No),
+      };
+    }));
+  };
+  const demoSetStatus = (id: number, status: number) =>
+    setMarkets(ms => ms.map(m => (m.id === id ? { ...m, status } : m)));
+
+  const refundExpired = (id: number) => {
+    if (NOT_DEPLOYED) return void tx(`rexp-${id}`, async () => null, "Marked for refund").then(() => demoSetStatus(id, STATUS.Refunded));
+    tx(`rexp-${id}`, () => contract(true).refundExpiredMarket(id), "Marked for refund");
+  };
+
+  // ── Admin (owner-only) resolution + protocol controls ──
+  const adminResolve = (id: number, side: 1 | 2) => {
+    const label = `#${id} resolved ${side === 1 ? "YES" : "NO"}`;
+    if (NOT_DEPLOYED) return void tx(`ares-${id}`, async () => null, label).then(() => demoResolveMarket(id, side === 1 ? 0 : 1));
+    tx(`ares-${id}`, () => contract(true).resolve(id, side), label);
+  };
+  const adminResolveMulti = (id: number, outcomeIndex: number) => {
+    const mk = markets.find(x => x.id === id);
+    const label = `#${id} resolved: ${(mk?.outcomeLabels || [])[outcomeIndex] || `outcome ${outcomeIndex}`}`;
+    if (NOT_DEPLOYED) return void tx(`ares-${id}`, async () => null, label).then(() => demoResolveMarket(id, outcomeIndex));
+    tx(`ares-${id}`, () => contract(true).resolveOutcome(id, outcomeIndex), label);
+  };
+  const adminResolveDispute = (id: number, side: 1 | 2) => {
+    const label = `Dispute #${id} settled ${side === 1 ? "YES" : "NO"}`;
+    if (NOT_DEPLOYED) return void tx(`adis-${id}`, async () => null, label).then(() => demoResolveMarket(id, side === 1 ? 0 : 1));
+    tx(`adis-${id}`, () => contract(true).resolveDispute(id, side), label);
+  };
+  const adminResolveMultiDispute = (id: number, outcomeIndex: number) => {
+    const mk = markets.find(x => x.id === id);
+    const label = `Dispute #${id} settled: ${(mk?.outcomeLabels || [])[outcomeIndex] || `outcome ${outcomeIndex}`}`;
+    if (NOT_DEPLOYED) return void tx(`adis-${id}`, async () => null, label).then(() => demoResolveMarket(id, outcomeIndex));
+    tx(`adis-${id}`, () => contract(true).resolveMultiDispute(id, outcomeIndex), label);
+  };
+  const adminSetFee = () => {
+    const f = parseInt(adminFee, 10);
+    if (!Number.isFinite(f) || f < 0 || f > 50) return notify("Fee must be between 0 and 50 (0–5%)", true);
+    if (NOT_DEPLOYED) return void tx("afee", async () => null, `Fee set to ${f / 10}%`).then(() => setProtocolFee(f));
+    tx("afee", () => contract(true).setProtocolFee(f), `Fee set to ${f / 10}%`);
+  };
+  const adminWithdrawFees = () => {
+    if (accFees === 0n) return notify("No fees accrued", true);
+    if (feeRecipient && !ethers.isAddress(feeRecipient)) return notify("Invalid recipient address", true);
+    const to = feeRecipient || account;
+    if (NOT_DEPLOYED) return void tx("awd", async () => null, `Withdrew ${fmt(accFees)} TAC in fees`).then(() => setAccFees(0n));
+    tx("awd", () => contract(true).withdrawFees(to), `Withdrew ${fmt(accFees)} TAC in fees`);
+  };
+  const adminPause = () => {
+    const next = !paused;
+    if (NOT_DEPLOYED) return void tx("apause", async () => null, next ? "Protocol paused" : "Protocol unpaused").then(() => setPausedState(next));
+    tx("apause", () => contract(true).setPaused(next), next ? "Protocol paused" : "Protocol unpaused");
+  };
+  const adminTransferOwnership = () => {
+    const to = newOwner.trim();
+    if (!ethers.isAddress(to)) return notify("Enter a valid new owner address", true);
+    if (account && to.toLowerCase() === account.toLowerCase()) return notify("That address is already the owner", true);
+    if (to === ZERO_ADDR) return notify("Cannot transfer to the zero address", true);
+    if (NOT_DEPLOYED) return void tx("axfer", async () => null, "Ownership transfer started (demo)").then(() => { setPendingOwner(to); setNewOwner(""); });
+    tx("axfer", () => contract(true).transferOwnership(to), "Transfer started — the new owner must call acceptOwnership").then(() => { setPendingOwner(to); setNewOwner(""); });
+  };
 
   const totalVol = useMemo(() => markets.reduce((s, m) => s + m.totalYesPool + m.totalNoPool, 0n), [markets]);
   const activeCount = markets.filter(m => m.status === STATUS.Open && now < m.resolutionTime).length;
@@ -1564,7 +1771,13 @@ export default function App() {
     const pool = [...openMarkets].sort((a, b) => a.resolutionTime - b.resolutionTime);
     return pool[0] || null;
   }, [openMarkets]);
-  const unresolvedCount = markets.filter(m => m.status === STATUS.Open && now >= m.resolutionTime && m.totalYesPool > 0n && m.totalNoPool > 0n).length;
+  const unresolvedCount = markets.filter(m =>
+    m.status === STATUS.Open && now >= m.resolutionTime && (
+      (m.outcomeCount || 2) > 2
+        ? (m.outcomePools || []).filter(p => p > 0n).length >= 2
+        : m.totalYesPool > 0n && m.totalNoPool > 0n
+    )
+  ).length;
   const watchlistedMarkets = useMemo(() => markets.filter(m => favoritesSet.has(m.id)), [markets, favoritesSet]);
   const latestActivity = activity[0] || null;
 
@@ -1574,8 +1787,7 @@ export default function App() {
     requestAnimationFrame(() => document.getElementById(`mk-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }));
   }, []);
 
-  const paletteItems = useMemo<PaletteItem[]>(() => {
-    const nav: PaletteItem[] = [
+  const paletteItems: PaletteItem[] = [
       { id: "v-markets", icon: <BarChart3 size={15} />, label: "Go to Markets", hint: "view", run: () => setView("markets") },
       { id: "v-vault", icon: <Landmark size={15} />, label: "Go to Vault", hint: "view", run: () => setView("vault") },
       { id: "v-portfolio", icon: <Target size={15} />, label: "Go to Portfolio", hint: "view", run: () => setView("portfolio") },
@@ -1586,8 +1798,7 @@ export default function App() {
       { id: "a-claim", icon: <PartyPopper size={15} />, label: "Claim all winnings", hint: "action", run: () => { setView("portfolio"); claimAll() } },
       { id: "a-theme", icon: <Palette size={15} />, label: `Switch theme (now: ${THEME_LABEL[theme] || theme})`, hint: "action", run: cycleTheme },
       { id: "a-refresh", icon: <RefreshCw size={15} />, label: "Refresh data", hint: "action", run: loadAll },
-    ];
-    const mks: PaletteItem[] = markets.map(m => {
+    ...markets.map<PaletteItem>(m => {
       const o = odds(m.totalYesPool, m.totalNoPool);
       return {
         id: `m-${m.id}`,
@@ -1596,9 +1807,8 @@ export default function App() {
         hint: `YES ${o.y}% · ${fmt(m.totalYesPool + m.totalNoPool)} TAC`,
         run: () => jumpToMarket(m.id),
       };
-    });
-    return [...nav, ...mks];
-  }, [markets, theme, THEME_LABEL, cycleTheme, loadAll, jumpToMarket]);
+    }),
+  ];
 
   const filtered = useMemo(() => {
     const qText = search.trim().toLowerCase();
@@ -1633,8 +1843,36 @@ export default function App() {
     [...markets].filter(m => m.status === STATUS.Open && now < m.resolutionTime)
       .sort((a, b) => ((b.totalYesPool + b.totalNoPool) > (a.totalYesPool + a.totalNoPool) ? 1 : -1)).slice(0, 3),
     [markets, now]);
+  // Multi-aware market classifiers (binary uses YES/NO pools; multi uses outcome pools).
+  const isMultiMarket = (m: Market) => (m.outcomeCount || 2) > 2;
+  const fundedOutcomeCount = (m: Market) =>
+    isMultiMarket(m)
+      ? (m.outcomePools || []).filter(p => p > 0n).length
+      : (m.totalYesPool > 0n ? 1 : 0) + (m.totalNoPool > 0n ? 1 : 0);
+  const isExpired = (m: Market) => m.status === STATUS.Open && now >= m.resolutionTime;
+  const needsResolution = (m: Market) => isExpired(m) && fundedOutcomeCount(m) >= 2;
+  const isOneSidedExpired = (m: Market) => isExpired(m) && fundedOutcomeCount(m) <= 1;
   const disputedMarkets = markets.filter(m => m.status === STATUS.Disputed);
-  const awaitingResolution = markets.filter(m => m.status === STATUS.Open && now >= m.resolutionTime && m.totalYesPool > 0n && m.totalNoPool > 0n);
+  const awaitingResolution = markets.filter(needsResolution);
+  const oneSidedExpired = markets.filter(isOneSidedExpired);
+  const adminInAction = (m: Market) => needsResolution(m) || m.status === STATUS.Disputed || isOneSidedExpired(m);
+  const adminActionCount = awaitingResolution.length + disputedMarkets.length + oneSidedExpired.length;
+  const adminPools = (() => {
+    const query = adminSearch.trim().toLowerCase();
+    return markets
+      .filter(m => {
+        if (query && !`#${m.id} ${m.question} ${m.category}`.toLowerCase().includes(query)) return false;
+        if (adminPoolFilter === "action") return adminInAction(m);
+        if (adminPoolFilter === "disputed") return m.status === STATUS.Disputed;
+        if (adminPoolFilter === "open") return m.status === STATUS.Open;
+        if (adminPoolFilter === "resolved") return m.status !== STATUS.Open;
+        return true; // "all"
+      })
+      .sort((a, b) => {
+        const d = (adminInAction(a) ? 0 : 1) - (adminInAction(b) ? 0 : 1);
+        return d !== 0 ? d : b.createdAt - a.createdAt;
+      });
+  })();
   const isCreator = (m: Market) => account && m.creator.toLowerCase() === account.toLowerCase();
   const claimable = markets.filter(m => {
     const multi = (m.outcomeCount || 2) > 2;
@@ -1675,9 +1913,12 @@ export default function App() {
     const stakeN = Math.max(0, parseFloat(calcStake) || 0);
     const feePct = Math.min(5, Math.max(0, parseFloat(calcFee) || 0));
     if (stakeN <= 0) return { yes: 0, no: 0, yesMult: 0, noMult: 0 };
-    // Simple implied payout if current odds held and you took that side alone of the winning pool share approximation
-    const yesMult = (100 / yesPct) * (1 - feePct / 100 * (1 - yesPct / 100));
-    const noMult = (100 / (100 - yesPct)) * (1 - feePct / 100 * (yesPct / 100));
+    // Implied payout if current odds held. The protocol fee is charged on the
+    // stake up front (net stake enters the pool), so the gross multiplier 1/odds
+    // is scaled by (1 - fee). Marginal impact of your own stake is ignored.
+    const f = feePct / 100;
+    const yesMult = (1 - f) * (100 / yesPct);
+    const noMult = (1 - f) * (100 / (100 - yesPct));
     return {
       yes: stakeN * yesMult,
       no: stakeN * noMult,
@@ -1818,7 +2059,7 @@ export default function App() {
               <h3><Calculator size={16} /> Odds calculator</h3>
               <button className="icon-chip" onClick={() => setCalcOpen(false)} aria-label="Close"><X size={14} /></button>
             </div>
-            <p className="sub">Estimate payout if current odds held and you won. Fee applies to profit only in the real pool math.</p>
+            <p className="sub">Estimate payout if current odds held and you won. A protocol fee is charged on each bet up front in the real pool.</p>
             <div className="calc-grid">
               <label>YES odds %
                 <input type="number" min="1" max="99" value={calcYes} onChange={e => setCalcYes(e.target.value)} />
@@ -1849,7 +2090,7 @@ export default function App() {
           <button className={view === "vault" ? "on" : ""} onClick={() => setView("vault")}><Landmark size={15} /> Vault</button>
           <button className={view === "portfolio" ? "on" : ""} onClick={() => setView("portfolio")}><User size={15} /> You</button>
           <button className={view === "leaderboard" ? "on" : ""} onClick={() => setView("leaderboard")}><Trophy size={15} /> Rank</button>
-          {isOwner && <button className={`admin-tab ${view === "admin" ? "on" : ""}`} onClick={() => setView("admin")}><Shield size={15} /> Admin</button>}
+          {ADMIN_MODE && <button className={`admin-tab ${view === "admin" ? "on" : ""}`} onClick={() => setView("admin")}><Shield size={15} /> Admin</button>}
         </div>
         <div className="nav-right">
           <button className="palette-btn" onClick={() => setPaletteOpen(true)} title="Command palette (⌘K or /)">
@@ -1930,22 +2171,7 @@ export default function App() {
         <div className="sa-toast" role="status">TAC smart account: {smartAccount.slice(0, 8)}…{smartAccount.slice(-6)}</div>
       )}
 
-      {markets.length > 0 && view !== "home" && (
-        <div className="ticker">
-          <div className="ticker-track">
-            {[...markets, ...markets].map((m, i) => {
-              const o = odds(m.totalYesPool, m.totalNoPool);
-              return (
-                <span key={`${m.id}-${i}`} className="tick" onClick={() => { setView("markets"); setExpanded(m.id); }}>
-                  <span className="t-cat">{CAT_ICONS[m.category] || "🎲"}</span>
-                  <span className="t-q">{m.question}</span>
-                  <span className={`t-odds ${o.y >= 50 ? "up" : "down"}`}>YES {o.y}%</span>
-                </span>
-              );
-            })}
-          </div>
-        </div>
-      )}
+      {/* Ticker removed - pixlet-strip on home page serves this purpose */}
 
       {view === "home" && (
         <>
@@ -1953,22 +2179,21 @@ export default function App() {
             <div className="hero-grid">
               <div className="hero-inner">
                 <div className="hero-badge"><span className="pulse-dot" /><Sparkles size={13} /> Live on TAC · Telegram ready</div>
-                <h1>Call it. <span className="grad">Stake it.</span> Win the pool.</h1>
-                <p>Peer-to-peer prediction markets for the TON / TAC stack. Stake YES or NO, climb ranks, cash out winners. No house edge — just the pool.</p>
+                <h1>Predict the Future. <span className="grad">Stake Your Call.</span> Win Big.</h1>
+                <p>The first peer-to-peer prediction market built for TON and TAC. Make bold predictions, back them with crypto, and split the winning pool. Pure pari-mutuel betting — no house, no odds-makers, just you vs. the crowd.</p>
                 <div className="hero-visual desktop-only" aria-hidden>
                   <HeroChartArt className="hero-chart-art" />
                 </div>
                 <div className="hero-stats">
-                  <div className="stat"><CircleDollarSign className="stat-ico" size={18} /><span className="v"><CountUp value={parseFloat(ethers.formatEther(totalVol))} /> TAC</span><span className="l">Volume</span></div>
-                  <div className="stat"><Activity className="stat-ico" size={18} /><span className="v"><CountUp value={activeCount} dp={0} /></span><span className="l">Live Markets</span></div>
-                  <div className="stat"><Users className="stat-ico" size={18} /><span className="v"><CountUp value={totalBettors} dp={0} /></span><span className="l">Positions</span></div>
-                  <div className="stat"><Eye className="stat-ico" size={18} /><span className="v">100%</span><span className="l">On-chain</span></div>
+                  <div className="stat"><CircleDollarSign className="stat-ico" size={18} /><span className="v"><CountUp value={parseFloat(ethers.formatEther(totalVol))} /> TAC</span><span className="l">Total Volume</span></div>
+                  <div className="stat"><Activity className="stat-ico" size={18} /><span className="v"><CountUp value={activeCount} dp={0} /></span><span className="l">Active Markets</span></div>
+                  <div className="stat"><Users className="stat-ico" size={18} /><span className="v"><CountUp value={totalBettors} dp={0} /></span><span className="l">Total Bettors</span></div>
+                  <div className="stat"><Trophy className="stat-ico" size={18} /><span className="v">{markets.filter(m => m.status === STATUS.Resolved).length}</span><span className="l">Settled</span></div>
                 </div>
                 <div className="hero-actions">
-                  <button onClick={() => { setView("markets"); setTab("open"); }}>Explore markets</button>
-                  <button onClick={() => { setView("markets"); setTab("ending"); }}>Ending soon</button>
-                  <button onClick={() => { setView("markets"); setSortBy("watchlist"); }}>Watchlist</button>
-                  <button onClick={() => { setView("markets"); setShowCreate(true); }}>Create market</button>
+                  <button className="primary-cta" onClick={() => { setView("markets"); setTab("open"); }}><TrendingUp size={16} /> Browse Live Markets</button>
+                  {!account && <button className="secondary-cta" onClick={openConnect}><Wallet size={16} /> Connect Wallet</button>}
+                  {account && <button className="secondary-cta" onClick={() => { setView("markets"); setShowCreate(true); }}><Plus size={16} /> Create Market</button>}
                 </div>
               </div>
               <aside className="hero-side">
@@ -2498,7 +2723,7 @@ export default function App() {
                       </div>
 
                       <div className="transparency">
-                        <Shield size={12} /> Pool math on-chain · fee {protocolFee / 10}% · payout = stake + share of losing pool · 3-day dispute window
+                        <Shield size={12} /> Pool math on-chain · fee {protocolFee / 10}% per bet · payout = net stake + share of losing pool · 3-day dispute window
                         {m.resolutionSource ? ` · oracle: ${m.resolutionSource}` : ""}
                       </div>
                     </div>
@@ -2818,19 +3043,29 @@ export default function App() {
         </section>
       )}
 
-      {view === "admin" && isOwner && (
+      {view === "admin" && ADMIN_MODE && (
         <section className="admin">
           <div className="admin-head">
             <div>
               <h2><Shield size={22} /> Admin Console</h2>
-              <p className="sub">Protocol operations, live-chain configuration and launch checklist. Only visible to the contract owner.</p>
+              <p className="sub">Validate pools, settle results, and manage the protocol. This surface is served behind a separate login; on-chain actions still require the owner wallet.</p>
             </div>
             <span className={`admin-env ${NOT_DEPLOYED ? "demo" : "live"}`}>{NOT_DEPLOYED ? "DEMO MODE" : "LIVE CHAIN"}</span>
           </div>
 
+          {!NOT_DEPLOYED && !account && (
+            <div className="ap-note warn"><Wallet size={13} /> Connect the owner wallet to sign admin transactions (resolve, fees, pause, transfer).</div>
+          )}
+          {!NOT_DEPLOYED && account && !isOwner && (
+            <div className="ap-note danger"><Shield size={13} /> The connected wallet is not the contract owner — admin transactions will revert. Switch to the owner wallet.</div>
+          )}
+
           <div className="admin-tabs">
-            {([["overview", "Overview"], ["launch", "Launch Setup"], ["ops", "Operations"]] as const).map(([k, label]) => (
-              <button key={k} className={adminMode === k ? "on" : ""} onClick={() => setAdminMode(k)}>{label}</button>
+            {([["overview", "Overview"], ["pools", "Resolve Pools"], ["protocol", "Protocol"], ["launch", "Launch Setup"]] as const).map(([k, label]) => (
+              <button key={k} className={adminMode === k ? "on" : ""} onClick={() => setAdminMode(k)}>
+                {label}
+                {k === "pools" && adminActionCount > 0 && <span className="admin-tab-badge">{adminActionCount}</span>}
+              </button>
             ))}
           </div>
 
@@ -2855,12 +3090,12 @@ export default function App() {
                   <span>Open <b>{openMarkets.length}</b></span>
                   <span>Awaiting resolution <b className={awaitingResolution.length ? "warn" : "ok"}>{awaitingResolution.length}</b></span>
                   <span>Disputes <b className={disputedMarkets.length ? "warn" : "ok"}>{disputedMarkets.length}</b></span>
+                  <span>One-sided (refund) <b className={oneSidedExpired.length ? "warn" : "ok"}>{oneSidedExpired.length}</b></span>
                   <span>Volume <b>{fmt(totalVol)} TAC</b></span>
-                  <span>Positions <b>{totalBettors}</b></span>
                 </div>
-                {(awaitingResolution.length > 0 || disputedMarkets.length > 0) && (
-                  <button className="act" onClick={() => setAdminMode("ops")}>Go to Operations →</button>
-                )}
+                {adminActionCount > 0
+                  ? <button className="act claim" onClick={() => { setAdminMode("pools"); setAdminPoolFilter("action"); }}>Resolve {adminActionCount} pool(s) →</button>
+                  : <p className="sub" style={{ margin: 0 }}>✓ All pools settled — nothing needs action.</p>}
               </div>
               <div className="ad-card wide">
                 <h4><Link2 size={15} /> Connection</h4>
@@ -2917,6 +3152,33 @@ export default function App() {
                     setTimeout(() => window.location.reload(), 900);
                   }}>Reset to defaults</button>
                 </div>
+                <p className="launch-note" style={{ marginTop: 12 }}>
+                  <Link2 size={13} /> The form above only switches <b>your</b> browser (localStorage). To take the <b>whole public site</b> live for every visitor, use the “Site-wide go-live” card below.
+                </p>
+              </div>
+
+              <div className="ad-card wide launch-golive">
+                <h4><Zap size={15} /> Site-wide go-live</h4>
+                <p className="sub">
+                  The public site reads <code>deploy-config.json</code> (served at <code>/app-config.json</code>) when it loads.
+                  While its <code>contract</code> is empty, everyone sees demo mode. Fill it in and restart the server to take the whole site live.
+                </p>
+                <div className="ad-facts">
+                  <span>Server mode <b className={NOT_DEPLOYED ? "warn" : "ok"}>{NOT_DEPLOYED ? "DEMO" : "LIVE"}</b></span>
+                  <span>Server contract <b>{SERVER_CONFIG.contract && ethers.isAddress(SERVER_CONFIG.contract) ? `${SERVER_CONFIG.contract.slice(0, 10)}…${SERVER_CONFIG.contract.slice(-4)}` : "not set"}</b></span>
+                  <span>Network <b>{ACTIVE_CHAIN_NAME}</b></span>
+                </div>
+                <p className="sub">1. Save this to <code>frontend/deploy-config.json</code> (reflects the form values above):</p>
+                <pre>{JSON.stringify({ contract: (configDraft.contract || "").trim(), rpc: (configDraft.rpc || "").trim(), chain: configDraft.chain || CHAIN_PREF }, null, 2)}</pre>
+                <div className="lc-actions">
+                  <button className="act" onClick={() => {
+                    const json = JSON.stringify({ contract: (configDraft.contract || "").trim(), rpc: (configDraft.rpc || "").trim(), chain: configDraft.chain || CHAIN_PREF }, null, 2);
+                    void navigator.clipboard?.writeText(json).then(() => notify("deploy-config.json copied")).catch(() => notify("Copy failed", true));
+                  }}><Download size={14} /> Copy deploy-config.json</button>
+                </div>
+                <p className="launch-note" style={{ marginTop: 10 }}>
+                  2. Restart the servers (<code>serve_prod.py</code>). New visitors — and anyone who reloads — get the live contract. No rebuild needed.
+                </p>
               </div>
 
               <div className="ad-card wide launch-steps">
@@ -2946,7 +3208,7 @@ export default function App() {
                   </li>
                   <li>
                     <b>Operate</b>
-                    <p>After each market's deadline, resolve it in <b>Operations</b>. Bettors have a 3-day dispute window; disputed markets come back to you for a final ruling. Withdraw accrued fees whenever.</p>
+                    <p>After each market's deadline, settle it in <b>Resolve Pools</b> — binary markets pick YES/NO, multi-outcome markets pick the winner, and uncontested one-sided pools get refunded. Bettors have a 3-day dispute window; disputed markets come back to you for a final ruling. Manage fees, pause, and ownership under <b>Protocol</b>.</p>
                   </li>
                 </ol>
                 <div className="launch-note"><Shield size={13} /> Keys stay in your wallet — this panel never asks for or stores a private key. Config saved here is public info (address, RPC), safe in localStorage.</div>
@@ -2954,47 +3216,179 @@ export default function App() {
             </div>
           )}
 
-          {adminMode === "ops" && (
+          {adminMode === "pools" && (
+            <div className="admin-pools">
+              <p className="sub ap-intro">Validate and settle every pool here. Your team confirms each result off-chain, then resolves it on-chain — binary markets pick YES/NO, multi-outcome markets pick the winning option. One-sided (uncontested) expired pools are refunded. Bettors then get a 3-day window to dispute.</p>
+
+              <div className="ap-toolbar">
+                <div className="ap-filters">
+                  {([["action", `Needs action${adminActionCount ? ` · ${adminActionCount}` : ""}`], ["disputed", `Disputed${disputedMarkets.length ? ` · ${disputedMarkets.length}` : ""}`], ["open", "Open"], ["resolved", "Settled"], ["all", "All"]] as const).map(([k, label]) => (
+                    <button key={k} className={adminPoolFilter === k ? "on" : ""} onClick={() => setAdminPoolFilter(k)}>{label}</button>
+                  ))}
+                </div>
+                <div className="ap-tools">
+                  <label className="search-box" aria-label="Search pools">
+                    <Search size={14} />
+                    <input value={adminSearch} onChange={e => setAdminSearch(e.target.value)} placeholder="Search # / question / category" />
+                  </label>
+                  <button className="btn-refresh" onClick={loadAll} disabled={loading} title="Refresh from chain"><RefreshCw size={15} className={loading ? "spin" : ""} /></button>
+                </div>
+              </div>
+
+              {paused && <div className="ap-note warn"><Pause size={13} /> Protocol is paused. Resolution, disputes and refunds still work; new bets are blocked.</div>}
+              {!solvent && <div className="ap-note danger"><Shield size={13} /> Solvency warning — contract balance is below obligations. Investigate before settling payouts.</div>}
+
+              {adminPools.length === 0 && (
+                <div className="empty rich">
+                  <EmptyMarketsArt />
+                  <b>No pools here</b>
+                  <span>{adminPoolFilter === "action" ? "Every pool is settled — nothing needs your attention right now." : "Nothing matches this filter or search."}</span>
+                </div>
+              )}
+
+              <div className="ap-list">
+                {adminPools.map(m => {
+                  const multi = isMultiMarket(m);
+                  const labels = m.outcomeLabels && m.outcomeLabels.length ? m.outcomeLabels : ["YES", "NO"];
+                  const pools = m.outcomePools && m.outcomePools.length ? m.outcomePools : [m.totalYesPool, m.totalNoPool];
+                  const bettors = m.outcomeBettors && m.outcomeBettors.length ? m.outcomeBettors : [m.yesBettors, m.noBettors];
+                  const total = pools.reduce((a, b) => a + (b || 0n), 0n);
+                  const expired = now >= m.resolutionTime;
+                  const resolvable = needsResolution(m);
+                  const oneSided = isOneSidedExpired(m);
+                  const disputed = m.status === STATUS.Disputed;
+                  const busyR = !!busy[`ares-${m.id}`] || !!busy[`adis-${m.id}`] || !!busy[`rexp-${m.id}`];
+                  const pick = adminPick[m.id] ?? -1;
+                  const statusCls = m.status === STATUS.Open ? (expired ? "warn" : "open") : m.status === STATUS.Disputed ? "disp" : "done";
+                  const statusText = m.status === STATUS.Open ? (expired ? "EXPIRED · NEEDS ACTION" : "OPEN") : statusLabel(m.status).toUpperCase();
+                  const totalBettorsM = bettors.reduce((a, b) => a + (b || 0), 0);
+                  return (
+                    <div key={m.id} className={`ap-card ${adminInAction(m) ? "hot" : ""}`}>
+                      <div className="ap-head">
+                        <div className="ap-title">
+                          <span className="ap-id">#{m.id}</span>
+                          <span className="cat-chip art"><CatArt cat={m.category} size={14} /> {CAT_LABEL[m.category] || m.category}</span>
+                          {multi && <span className="fav-chip">multi · {m.outcomeCount} ways</span>}
+                          <span className={`ap-status ${statusCls}`}>{statusText}</span>
+                        </div>
+                        <button className="icon-chip" title="Open in Markets" onClick={() => jumpToMarket(m.id)}><ExternalLink size={13} /></button>
+                      </div>
+                      <h4 className="ap-q">{m.question}</h4>
+                      {m.description && <p className="ap-desc">{m.description}</p>}
+                      <div className="ap-meta">
+                        <span><CircleDollarSign size={12} /> {fmt(total)} TAC</span>
+                        <span><Users size={12} /> {totalBettorsM} bettors</span>
+                        <span><Clock size={12} /> {expired ? "ended " : "resolves "}{new Date(m.resolutionTime * 1000).toLocaleString()}</span>
+                        <span title={m.creator}><User size={12} /> {m.creator.slice(0, 6)}…{m.creator.slice(-4)}{isCreator(m) ? " (you)" : ""}</span>
+                      </div>
+                      {m.resolutionSource && (
+                        <div className="ap-oracle">
+                          <Shield size={12} /> Oracle:{" "}
+                          {safeHttpUrl(m.resolutionSource)
+                            ? <a href={safeHttpUrl(m.resolutionSource)} target="_blank" rel="noopener noreferrer">{m.resolutionSource} <ExternalLink size={10} /></a>
+                            : <span>{m.resolutionSource}</span>}
+                        </div>
+                      )}
+                      <div className="ap-outcomes">
+                        {labels.map((lab, i) => {
+                          const p = pools[i] || 0n;
+                          const pct = total > 0n ? Number((p * 1000n) / total) / 10 : Math.round(1000 / labels.length) / 10;
+                          const isWinner = (m.status === STATUS.Resolved) && (m.winnerOutcome ?? -1) === i;
+                          return (
+                            <div key={i} className={`ap-outcome ${isWinner ? "win" : ""}`}>
+                              <span className="apo-lab">{lab}{isWinner ? " ✓" : ""}</span>
+                              <div className="apo-track"><div style={{ width: `${pct}%` }} /></div>
+                              <span className="apo-val">{fmt(p)} · {pct.toFixed(1)}% · {bettors[i] || 0}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {(resolvable || disputed) && (
+                        <div className="ap-actions">
+                          <span className="ap-act-label">{disputed ? "⚖️ Disputed — set the FINAL outcome:" : "Confirmed result — resolve to the winning outcome:"}</span>
+                          {!multi ? (
+                            <div className="ap-btn-row">
+                              <button className="b-yes sm" disabled={busyR} onClick={() => disputed ? adminResolveDispute(m.id, 1) : adminResolve(m.id, 1)}>{labels[0] || "YES"} wins</button>
+                              <button className="b-no sm" disabled={busyR} onClick={() => disputed ? adminResolveDispute(m.id, 2) : adminResolve(m.id, 2)}>{labels[1] || "NO"} wins</button>
+                            </div>
+                          ) : (
+                            <>
+                              <div className="ap-btn-row wrap">
+                                {labels.map((lab, i) => (
+                                  <button key={i} className={`b-multi sm ${pick === i ? "on" : ""}`} disabled={busyR} onClick={() => setAdminPick({ ...adminPick, [m.id]: i })}>{lab}</button>
+                                ))}
+                              </div>
+                              <button className="btn-submit sm ap-confirm" disabled={busyR || pick < 0} onClick={() => disputed ? adminResolveMultiDispute(m.id, pick) : adminResolveMulti(m.id, pick)}>
+                                {pick < 0 ? "Select the winning outcome above" : `Confirm — “${labels[pick]}” wins`}
+                              </button>
+                            </>
+                          )}
+                          {disputed && <span className="ap-hint">Original ruling was: <b>{multi ? (labels[m.winnerOutcome ?? 0] || "—") : sideLabel(m.winner)}</b></span>}
+                        </div>
+                      )}
+                      {oneSided && !resolvable && (
+                        <div className="ap-actions">
+                          <span className="ap-act-label">Only one outcome was funded — no real contest. Refund every stake:</span>
+                          <button className="act refund" disabled={busyR} onClick={() => refundExpired(m.id)}>Refund pool #{m.id}</button>
+                        </div>
+                      )}
+                      {m.status === STATUS.Open && !expired && (
+                        <div className="ap-actions muted"><Clock size={13} /> Live — resolves in {timeLeft(m.resolutionTime, now, m.status)}. No action needed yet.</div>
+                      )}
+                      {m.status === STATUS.Resolved && (
+                        <div className="ap-actions muted"><PartyPopper size={13} /> Settled — <b>{multi ? (labels[m.winnerOutcome ?? 0] || "?") : sideLabel(m.winner)}</b> won. Winners claim after the dispute window.</div>
+                      )}
+                      {(m.status === STATUS.Cancelled || m.status === STATUS.Refunded) && (
+                        <div className="ap-actions muted">{statusLabel(m.status)} — participants can claim their refund.</div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {adminMode === "protocol" && (
             <div className="admin-grid">
               <div className="ad-card">
-                <h4><CircleDollarSign size={15} /> Fees</h4>
-                <label>Protocol fee (bp ÷ 10, max 50 = 5%)<input type="number" min="0" max="50" value={adminFee} onChange={e => setAdminFee(e.target.value)} /></label>
-                <button className="act" onClick={adminSetFee} disabled={busy.afee}>Set fee</button>
-                <label>Withdraw fees to (empty = you)<input placeholder="0x…" value={feeRecipient} onChange={e => setFeeRecipient(e.target.value)} /></label>
+                <h4><CircleDollarSign size={15} /> Protocol fee</h4>
+                <p className="sub">Taken from each bet and each early sell. Hard-capped at 5% in the contract. Currently <b>{protocolFee / 10}%</b>.</p>
+                <label>Fee (basis points ÷ 10 · max 50 = 5%)
+                  <input type="number" min="0" max="50" value={adminFee} onChange={e => setAdminFee(e.target.value)} />
+                </label>
+                <button className="act" onClick={adminSetFee} disabled={busy.afee}>Set fee to {(Number(adminFee) || 0) / 10}%</button>
+              </div>
+              <div className="ad-card">
+                <h4><Landmark size={15} /> Fee treasury</h4>
+                <div className="ad-facts"><span>Accrued fees <b>{fmt(accFees)} TAC</b></span></div>
+                <label>Withdraw to (empty = your address)
+                  <input placeholder="0x… recipient" value={feeRecipient} onChange={e => setFeeRecipient(e.target.value)} />
+                  {feeRecipient && !ethers.isAddress(feeRecipient) && <em className="lc-err">Not a valid address</em>}
+                </label>
                 <button className="act claim" onClick={adminWithdrawFees} disabled={busy.awd || accFees === 0n}>Withdraw {fmt(accFees)} TAC</button>
               </div>
               <div className="ad-card">
-                <h4><Pause size={15} /> Emergency</h4>
-                <p className="sub">Pausing blocks new bets, market creation and sells. Claims and withdrawals keep working — users can always exit.</p>
+                <h4><Pause size={15} /> Emergency pause</h4>
+                <p className="sub">Pausing blocks new bets, market creation, deposits and sells. Claims, refunds and withdrawals keep working so users can always exit.</p>
+                <div className="ad-facts"><span>State <b className={paused ? "warn" : "ok"}>{paused ? "PAUSED" : "LIVE"}</b></span></div>
                 <button className={`act ${paused ? "claim" : "cancel"}`} onClick={adminPause} disabled={busy.apause}>
                   {paused ? <><Play size={14} /> Unpause protocol</> : <><Pause size={14} /> Pause protocol</>}
                 </button>
               </div>
               <div className="ad-card wide">
-                <h4><Clock size={15} /> Awaiting Resolution ({awaitingResolution.length})</h4>
-                {awaitingResolution.length === 0 && <p className="sub">Nothing to resolve.</p>}
-                {awaitingResolution.map(m => (
-                  <div key={m.id} className="ad-market">
-                    <div><b>#{m.id}</b> {m.question}<div className="sub">Pool {fmt(m.totalYesPool + m.totalNoPool)} TAC · ended {new Date(m.resolutionTime * 1000).toLocaleString()}</div></div>
-                    <div className="ad-btns">
-                      <button className="b-yes sm" onClick={() => adminResolve(m.id, 1)} disabled={busy[`ares-${m.id}`]}>Resolve YES</button>
-                      <button className="b-no sm" onClick={() => adminResolve(m.id, 2)} disabled={busy[`ares-${m.id}`]}>Resolve NO</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="ad-card wide">
-                <h4><Scale size={15} /> Disputes ({disputedMarkets.length})</h4>
-                {disputedMarkets.length === 0 && <p className="sub">No open disputes.</p>}
-                {disputedMarkets.map(m => (
-                  <div key={m.id} className="ad-market">
-                    <div><b>#{m.id}</b> {m.question}<div className="sub">Original ruling: {sideLabel(m.winner)}</div></div>
-                    <div className="ad-btns">
-                      <button className="b-yes sm" onClick={() => adminResolveDispute(m.id, 1)} disabled={busy[`adis-${m.id}`]}>Final: YES</button>
-                      <button className="b-no sm" onClick={() => adminResolveDispute(m.id, 2)} disabled={busy[`adis-${m.id}`]}>Final: NO</button>
-                    </div>
-                  </div>
-                ))}
+                <h4><Shield size={15} /> Ownership</h4>
+                <div className="ad-conn">
+                  <div><span>Current owner</span><code>{account} (you)</code></div>
+                  <div><span>Pending owner</span><code>{pendingOwner || "none"}</code></div>
+                </div>
+                <p className="sub">Two-step transfer (Ownable2Step): the new owner must call <code>acceptOwnership()</code> from their wallet before control actually moves — so a typo can't lock you out. Renouncing ownership is permanently disabled on-chain, so the protocol can never be left unable to resolve markets.</p>
+                <label>Transfer ownership to
+                  <input placeholder="0x… new owner address" value={newOwner} onChange={e => setNewOwner(e.target.value)} />
+                  {newOwner && !ethers.isAddress(newOwner) && <em className="lc-err">Not a valid EVM address</em>}
+                </label>
+                <button className="act cancel" onClick={adminTransferOwnership} disabled={busy.axfer || !newOwner || !ethers.isAddress(newOwner)}>Start ownership transfer</button>
+                {pendingOwner && <p className="launch-note" style={{ marginTop: 10 }}><Clock size={13} /> Pending transfer to <code>{pendingOwner.slice(0, 10)}…{pendingOwner.slice(-6)}</code> — they must accept from their wallet to complete it.</p>}
               </div>
             </div>
           )}

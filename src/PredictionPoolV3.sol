@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /// @title PredictionPoolV3
@@ -9,9 +10,14 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 ///         bet from internal balance. Winnings credit back to vault balance.
 ///         Pull-payment pattern throughout. Fair resolution with disputes,
 ///         refunds, cancellation, and on-chain user stats.
-contract PredictionPoolV3 is Ownable, ReentrancyGuard {
+/// @dev    Uses Ownable2Step so ownership hand-off requires the new owner to
+///         accept (guards against transferring to an unrecoverable address).
+///         renounceOwnership() is permanently disabled because the owner is
+///         required to resolve markets and settle disputes — renouncing would
+///         strand user funds in every unresolved market.
+contract PredictionPoolV3 is Ownable2Step, ReentrancyGuard {
     // ──── Constants ────
-    uint256 public constant MAX_FEE = 50;            // 5% cap (basis points /1000)
+    uint256 public constant MAX_FEE = 50; // 5% cap (basis points /1000)
     uint256 public constant BASIS_POINTS = 1000;
     uint256 public constant MIN_STAKE = 0.01 ether;
     uint256 public constant MAX_STAKE = 1_000_000 ether;
@@ -27,21 +33,31 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
     uint256 public constant MAX_OUTCOME_LABEL_LEN = 48;
 
     // ──── State ────
-    uint256 public protocolFee = 20;                 // 2% default
+    uint256 public protocolFee = 20; // 2% default
     uint256 public accumulatedFees;
     uint256 public marketCount;
     bool public paused;
-    uint256 public totalVaultBalance;                // sum of all user balances (solvency check)
+    uint256 public totalVaultBalance; // sum of all user balances (solvency check)
 
-    enum Side { None, Yes, No }
-    enum Status { Open, Resolved, Disputed, Cancelled, Refunded }
+    enum Side {
+        None,
+        Yes,
+        No
+    }
+    enum Status {
+        Open,
+        Resolved,
+        Disputed,
+        Cancelled,
+        Refunded
+    }
 
     struct Market {
         address creator;
         string question;
         string description;
         string category;
-        string resolutionSource;                     // oracle / data source URL or description
+        string resolutionSource; // oracle / data source URL or description
         uint64 resolutionTime;
         uint64 createdAt;
         uint64 resolvedAt;
@@ -51,15 +67,15 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
         Side winner;
         uint32 yesBettors;
         uint32 noBettors;
-        uint8 outcomeCount;                          // 2 = binary YES/NO; 3–8 = multi-outcome
-        uint8 winnerOutcome;                         // multi: 0-based winner index; binary unused
-        mapping(address => Side) side;               // binary path
+        uint8 outcomeCount; // 2 = binary YES/NO; 3–8 = multi-outcome
+        uint8 winnerOutcome; // multi: 0-based winner index; binary unused
+        mapping(address => Side) side; // binary path
         mapping(address => uint256) amounts;
         mapping(address => bool) hasClaimed;
-        mapping(uint8 => uint256) multiPools;        // multi-outcome pools
+        mapping(uint8 => uint256) multiPools; // multi-outcome pools
         mapping(uint8 => uint32) multiBettors;
         mapping(uint8 => string) outcomeLabels;
-        mapping(address => uint8) multiSide;         // 0 = none; 1..outcomeCount = outcome index+1
+        mapping(address => uint8) multiSide; // 0 = none; 1..outcomeCount = outcome index+1
     }
 
     struct UserStats {
@@ -72,20 +88,47 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
     }
 
     mapping(uint256 => Market) public markets;
-    mapping(address => uint256) public vaultBalance;     // internal TAC balance
-    mapping(address => uint256[]) public userMarkets;    // markets user participated in
+    mapping(address => uint256) public vaultBalance; // internal TAC balance
+    mapping(address => uint256[]) public userMarkets; // markets user participated in
     mapping(address => mapping(uint256 => bool)) private inUserMarkets;
     mapping(address => UserStats) public userStats;
 
     // ──── Events ────
     event Deposited(address indexed user, uint256 amount, uint256 newBalance);
     event Withdrawn(address indexed user, uint256 amount, uint256 newBalance);
-    event MarketCreated(uint256 indexed marketId, address indexed creator, string question, string category, uint64 resolutionTime, uint256 stake, uint64 timestamp);
-    event MultiMarketCreated(uint256 indexed marketId, address indexed creator, string question, uint8 outcomeCount, uint64 resolutionTime, uint256 stake, uint64 timestamp);
+    event MarketCreated(
+        uint256 indexed marketId,
+        address indexed creator,
+        string question,
+        string category,
+        uint64 resolutionTime,
+        uint256 stake,
+        uint64 timestamp
+    );
+    event MultiMarketCreated(
+        uint256 indexed marketId,
+        address indexed creator,
+        string question,
+        uint8 outcomeCount,
+        uint64 resolutionTime,
+        uint256 stake,
+        uint64 timestamp
+    );
     event BetPlaced(uint256 indexed marketId, address indexed bettor, Side side, uint256 amount, uint64 timestamp);
-    event MultiBetPlaced(uint256 indexed marketId, address indexed bettor, uint8 outcomeIndex, uint256 amount, uint64 timestamp);
-    event PositionSold(uint256 indexed marketId, address indexed seller, Side side, uint256 amount, uint256 returned, uint64 timestamp);
-    event MultiPositionSold(uint256 indexed marketId, address indexed seller, uint8 outcomeIndex, uint256 amount, uint256 returned, uint64 timestamp);
+    event MultiBetPlaced(
+        uint256 indexed marketId, address indexed bettor, uint8 outcomeIndex, uint256 amount, uint64 timestamp
+    );
+    event PositionSold(
+        uint256 indexed marketId, address indexed seller, Side side, uint256 amount, uint256 returned, uint64 timestamp
+    );
+    event MultiPositionSold(
+        uint256 indexed marketId,
+        address indexed seller,
+        uint8 outcomeIndex,
+        uint256 amount,
+        uint256 returned,
+        uint64 timestamp
+    );
     event MarketResolved(uint256 indexed marketId, Side winner, uint256 totalPool, uint64 timestamp);
     event MultiMarketResolved(uint256 indexed marketId, uint8 winnerOutcome, uint256 totalPool, uint64 timestamp);
     event MarketDisputed(uint256 indexed marketId, address indexed disputer, uint64 timestamp);
@@ -108,6 +151,14 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
 
     constructor() Ownable(msg.sender) {}
 
+    /// @notice Renouncing ownership is permanently disabled. The owner must remain
+    ///         able to resolve markets and settle disputes; a renounce would lock
+    ///         all funds held in unresolved markets. Use transferOwnership +
+    ///         acceptOwnership (Ownable2Step) to hand control to a new owner.
+    function renounceOwnership() public pure override {
+        revert("Ownership cannot be renounced");
+    }
+
     // ════════ VAULT ════════
 
     function deposit() external payable notPaused nonReentrant {
@@ -123,7 +174,7 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
         require(bal >= amount, "Insufficient balance");
         vaultBalance[msg.sender] = bal - amount;
         totalVaultBalance -= amount;
-        (bool sent, ) = payable(msg.sender).call{value: amount}("");
+        (bool sent,) = payable(msg.sender).call{value: amount}("");
         require(sent, "Transfer failed");
         emit Withdrawn(msg.sender, amount, vaultBalance[msg.sender]);
     }
@@ -133,7 +184,7 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
         require(bal > 0, "Nothing to withdraw");
         vaultBalance[msg.sender] = 0;
         totalVaultBalance -= bal;
-        (bool sent, ) = payable(msg.sender).call{value: bal}("");
+        (bool sent,) = payable(msg.sender).call{value: bal}("");
         require(sent, "Transfer failed");
         emit Withdrawn(msg.sender, bal, 0);
     }
@@ -222,7 +273,9 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
         userStats[msg.sender].marketsCreated++;
         userStats[msg.sender].totalStaked += stake;
 
-        emit MultiMarketCreated(marketId, msg.sender, question, m.outcomeCount, resolutionTime, stake, uint64(block.timestamp));
+        emit MultiMarketCreated(
+            marketId, msg.sender, question, m.outcomeCount, resolutionTime, stake, uint64(block.timestamp)
+        );
         emit MarketCreated(marketId, msg.sender, question, category, resolutionTime, stake, uint64(block.timestamp));
         return marketId;
     }
@@ -664,38 +717,55 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
     // ════════ VIEWS ════════
 
     function getMarketInfo(uint256 marketId)
-        external view
+        external
+        view
         returns (
-            address creator, string memory question, string memory description, string memory category,
-            uint64 resolutionTime, uint64 createdAt, uint64 resolvedAt,
-            uint256 totalYesPool, uint256 totalNoPool,
-            Status status, Side winner, uint32 yesBettors, uint32 noBettors
+            address creator,
+            string memory question,
+            string memory description,
+            string memory category,
+            uint64 resolutionTime,
+            uint64 createdAt,
+            uint64 resolvedAt,
+            uint256 totalYesPool,
+            uint256 totalNoPool,
+            Status status,
+            Side winner,
+            uint32 yesBettors,
+            uint32 noBettors
         )
     {
         Market storage m = markets[marketId];
-        return (m.creator, m.question, m.description, m.category, m.resolutionTime, m.createdAt, m.resolvedAt,
-                m.totalYesPool, m.totalNoPool, m.status, m.winner, m.yesBettors, m.noBettors);
+        return (
+            m.creator,
+            m.question,
+            m.description,
+            m.category,
+            m.resolutionTime,
+            m.createdAt,
+            m.resolvedAt,
+            m.totalYesPool,
+            m.totalNoPool,
+            m.status,
+            m.winner,
+            m.yesBettors,
+            m.noBettors
+        );
     }
 
     function getMarketMeta(uint256 marketId)
-        external view
-        returns (
-            string memory resolutionSource,
-            uint8 outcomeCount,
-            uint8 winnerOutcome
-        )
+        external
+        view
+        returns (string memory resolutionSource, uint8 outcomeCount, uint8 winnerOutcome)
     {
         Market storage m = markets[marketId];
         return (m.resolutionSource, m.outcomeCount == 0 ? 2 : m.outcomeCount, m.winnerOutcome);
     }
 
     function getMultiMarket(uint256 marketId)
-        external view
-        returns (
-            string[] memory labels,
-            uint256[] memory pools,
-            uint32[] memory bettors
-        )
+        external
+        view
+        returns (string[] memory labels, uint256[] memory pools, uint32[] memory bettors)
     {
         Market storage m = markets[marketId];
         uint8 n = m.outcomeCount == 0 ? 2 : m.outcomeCount;
@@ -717,7 +787,8 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
     }
 
     function getUserMultiBet(uint256 marketId, address user)
-        external view
+        external
+        view
         returns (uint8 outcomeIndex, uint256 amount, bool claimed)
     {
         Market storage m = markets[marketId];
@@ -728,10 +799,7 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
     }
 
     /// @notice Paginated market ids (1-based). Returns up to `limit` ids starting at `offset` (0-based into id space).
-    function getMarketsPage(uint256 offset, uint256 limit)
-        external view
-        returns (uint256[] memory ids, uint256 total)
-    {
+    function getMarketsPage(uint256 offset, uint256 limit) external view returns (uint256[] memory ids, uint256 total) {
         total = marketCount;
         if (offset >= total || limit == 0) {
             ids = new uint256[](0);
@@ -747,7 +815,9 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
     }
 
     function getUserBet(uint256 marketId, address user)
-        external view returns (Side side, uint256 amount, bool claimed)
+        external
+        view
+        returns (Side side, uint256 amount, bool claimed)
     {
         Market storage m = markets[marketId];
         return (m.side[user], m.amounts[user], m.hasClaimed[user]);
@@ -761,9 +831,7 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
         noPercent = 1000 - yesPercent;
     }
 
-    function getPotentialPayout(uint256 marketId, address user)
-        external view returns (uint256 ifYes, uint256 ifNo)
-    {
+    function getPotentialPayout(uint256 marketId, address user) external view returns (uint256 ifYes, uint256 ifNo) {
         Market storage m = markets[marketId];
         uint256 amt = m.amounts[user];
         if (amt == 0) return (0, 0);
@@ -791,7 +859,7 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
     }
 
     function isSolvent() external view returns (bool) {
-        (bool solvent, , ) = solvencyCheck();
+        (bool solvent,,) = solvencyCheck();
         return solvent;
     }
 
@@ -808,7 +876,7 @@ contract PredictionPoolV3 is Ownable, ReentrancyGuard {
         uint256 amount = accumulatedFees;
         require(amount > 0, "No fees");
         accumulatedFees = 0;
-        (bool sent, ) = payable(to).call{value: amount}("");
+        (bool sent,) = payable(to).call{value: amount}("");
         require(sent, "Transfer failed");
         emit FeesWithdrawn(to, amount);
     }

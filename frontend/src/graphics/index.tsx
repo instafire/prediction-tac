@@ -153,12 +153,3 @@ export function LoadingSkeleton({ rows = 3 }: { rows?: number }) {
     </div>
   );
 }
-
-export const CAT_ART_KEY: Record<string, string> = {
-  crypto: "crypto",
-  politics: "politics",
-  sports: "sports",
-  tech: "tech",
-  culture: "culture",
-  misc: "misc",
-};

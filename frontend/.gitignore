@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Deployment secrets / per-host config (never commit)
+admin-auth.json
+deploy-config.json

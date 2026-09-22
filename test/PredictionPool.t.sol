@@ -26,10 +26,7 @@ contract PredictionPoolTest is Test {
     function _createMarket() internal returns (uint256) {
         vm.prank(creator);
         return pool.createMarket{value: 100 ether}(
-            "Will TAC hit $1?",
-            "Market to predict TAC token price",
-            "crypto",
-            block.timestamp + 7 days
+            "Will TAC hit $1?", "Market to predict TAC token price", "crypto", block.timestamp + 7 days
         );
     }
 
@@ -38,7 +35,7 @@ contract PredictionPoolTest is Test {
         assertEq(marketId, 1);
         assertEq(pool.marketCount(), 1);
 
-        (address mCreator, string memory q, , string memory cat, uint256 rt, , , uint256 yesPool, uint256 noPool, , ) =
+        (address mCreator, string memory q,, string memory cat, uint256 rt,,, uint256 yesPool, uint256 noPool,,) =
             pool.getMarketInfo(marketId);
 
         assertEq(mCreator, creator);
@@ -70,7 +67,7 @@ contract PredictionPoolTest is Test {
         vm.prank(bettor2);
         pool.betYes{value: 50 ether}(1);
 
-        (, , , , , , , uint256 yesPool, , , ) = pool.getMarketInfo(1);
+        (,,,,,,, uint256 yesPool,,,) = pool.getMarketInfo(1);
         uint256 expectedNet = 50 ether - (50 ether * 20 / 1000);
         assertEq(yesPool, 100 ether + expectedNet);
     }
@@ -80,7 +77,7 @@ contract PredictionPoolTest is Test {
         vm.prank(bettor1);
         pool.betNo{value: 50 ether}(1);
 
-        (, , , , , , , , uint256 noPool, , ) = pool.getMarketInfo(1);
+        (,,,,,,,, uint256 noPool,,) = pool.getMarketInfo(1);
         uint256 expectedNet = 50 ether - (50 ether * 20 / 1000);
         assertEq(noPool, expectedNet);
     }
@@ -101,7 +98,7 @@ contract PredictionPoolTest is Test {
         pool.betNo{value: 30 ether}(1);
         vm.stopPrank();
 
-        (PredictionPool.Side side, uint256 amount, ) = pool.getUserBet(1, bettor1);
+        (PredictionPool.Side side, uint256 amount,) = pool.getUserBet(1, bettor1);
         assertEq(uint256(side), uint256(PredictionPool.Side.No));
         uint256 net = (50 ether + 30 ether) - ((50 ether + 30 ether) * 20 / 1000);
         assertEq(amount, net);
@@ -170,7 +167,7 @@ contract PredictionPoolTest is Test {
 
         assertGt(creator.balance, balBefore);
 
-        (, , , , , , , , , PredictionPool.Status status, ) = pool.getMarketInfo(1);
+        (,,,,,,,,, PredictionPool.Status status,) = pool.getMarketInfo(1);
         assertEq(uint256(status), uint256(PredictionPool.Status.Cancelled));
     }
 
@@ -191,7 +188,7 @@ contract PredictionPoolTest is Test {
         vm.prank(bettor1);
         pool.refundExpiredMarket(1);
 
-        (, , , , , , , , , PredictionPool.Status status, ) = pool.getMarketInfo(1);
+        (,,,,,,,,, PredictionPool.Status status,) = pool.getMarketInfo(1);
         assertEq(uint256(status), uint256(PredictionPool.Status.Refunded));
 
         uint256 balBefore = creator.balance;
@@ -224,7 +221,7 @@ contract PredictionPoolTest is Test {
         vm.prank(bettor1);
         pool.dispute(1);
 
-        (, , , , , , , , , PredictionPool.Status status, ) = pool.getMarketInfo(1);
+        (,,,,,,,,, PredictionPool.Status status,) = pool.getMarketInfo(1);
         assertEq(uint256(status), uint256(PredictionPool.Status.Disputed));
 
         vm.prank(owner);
