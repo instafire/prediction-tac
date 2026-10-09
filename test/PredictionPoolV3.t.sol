@@ -329,6 +329,24 @@ contract PredictionPoolV3Test is Test {
         pool.dispute(1);
     }
 
+    function test_ResolutionRejectsUnfundedWinningSide() public {
+        _createMarket();
+        vm.warp(block.timestamp + 8 days);
+        vm.prank(owner);
+        vm.expectRevert("No winning liquidity");
+        pool.resolve(1, PredictionPoolV3.Side.No);
+
+        vm.prank(owner);
+        pool.resolve(1, PredictionPoolV3.Side.Yes);
+        vm.prank(alice);
+        pool.dispute(1);
+        vm.prank(owner);
+        vm.expectRevert("No winning liquidity");
+        pool.resolveDispute(1, PredictionPoolV3.Side.No);
+        vm.prank(owner);
+        pool.resolveDispute(1, PredictionPoolV3.Side.Yes);
+    }
+
     // ──── Cancel / refund ────
 
     function test_CancelMarket() public {
@@ -336,6 +354,7 @@ contract PredictionPoolV3Test is Test {
         vm.prank(alice);
         pool.cancelMarket(1);
         assertEq(pool.vaultBalance(alice), 10_000 ether); // full refund
+        assertEq(pool.totalLockedPools(), 0);
     }
 
     function test_CancelWithBettorsReverts() public {
@@ -415,6 +434,52 @@ contract PredictionPoolV3Test is Test {
         pool.bet(1, PredictionPoolV3.Side.No, 100 ether);
         (bool solvent,,) = pool.solvencyCheck();
         assertTrue(solvent);
+    }
+
+    function test_SolvencyIncludesEscrowAndDetectsDeficit() public {
+        _createMarket();
+        assertEq(pool.totalLockedPools(), 100 ether);
+        (bool solvent, uint256 contractBalance, uint256 obligations) = pool.solvencyCheck();
+        assertTrue(solvent);
+        assertEq(obligations, 30_000 ether);
+        assertEq(obligations, contractBalance);
+
+        vm.deal(address(pool), contractBalance - 1);
+        (solvent, contractBalance, obligations) = pool.solvencyCheck();
+        assertFalse(solvent);
+        assertEq(contractBalance + 1, obligations);
+    }
+
+    function test_LockedPoolAccountingAcrossBetSellAndClaim() public {
+        _createMarket();
+        vm.prank(bob);
+        pool.bet(1, PredictionPoolV3.Side.No, 100 ether);
+        assertEq(pool.totalLockedPools(), 198 ether);
+
+        vm.prank(bob);
+        pool.sellPosition(1, 49 ether);
+        assertEq(pool.totalLockedPools(), 149 ether);
+
+        vm.warp(block.timestamp + 8 days);
+        vm.prank(owner);
+        pool.resolve(1, PredictionPoolV3.Side.Yes);
+        vm.warp(block.timestamp + 3 days);
+        vm.prank(alice);
+        pool.claim(1);
+        assertEq(pool.totalLockedPools(), 0);
+        assertTrue(pool.isSolvent());
+    }
+
+    function test_RefundClaimReleasesLockedPoolLiability() public {
+        _createMarket();
+        vm.warp(block.timestamp + 8 days);
+        pool.refundExpiredMarket(1);
+        assertEq(pool.totalLockedPools(), 100 ether);
+
+        vm.prank(alice);
+        pool.claimRefund(1);
+        assertEq(pool.totalLockedPools(), 0);
+        assertTrue(pool.isSolvent());
     }
 
     function test_UserStats() public {

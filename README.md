@@ -32,9 +32,10 @@ Prediction Tac
 │   ├── PredictionPoolV3.sol      # Core V3 Protocol: Vault, Markets, Multi-Outcome, Disputes
 │   └── PredictionPool.sol        # Legacy V1 Protocol
 ├── test/                         # Foundry Automated Test Suites
-│   ├── PredictionPoolV3.t.sol    # Core V3 unit & integration tests (35 tests)
-│   ├── PredictionPoolV3Features.t.sol # Feature-specific tests (6 tests)
-│   └── PredictionPool.t.sol      # Legacy regression tests
+│   ├── PredictionPoolV3.t.sol    # Core V3 unit & integration tests (39 tests)
+│   ├── PredictionPoolV3Features.t.sol # Feature-specific tests (10 tests)
+│   ├── PredictionPool.t.sol      # Legacy regression tests (22 tests)
+│   └── Counter.t.sol              # Foundry template tests (2 tests)
 ├── script/                       # Deployment Scripts
 │   ├── DeployV3.s.sol            # Production & testnet deploy script
 │   └── Counter.s.sol
@@ -68,9 +69,9 @@ The protocol uses a single-contract architecture managed with Foundry:
 - **Vault Model**: Users deposit native TAC into the contract vault. Staking, payouts, refunds, and withdrawals occur against vault balances to minimize external gas and call-depth vulnerabilities.
 - **Solvency Invariant**: Strict solvency checks verify that the contract's native balance always satisfies `contract.balance >= totalVaultBalance + totalLockedPools + accumulatedFees`.
 - **Early Exit Mechanism**: Users can sell positions before market resolution with an exit fee returned to the vault.
-- **Resolution & Dispute Safeguards**: Owner-resolved markets include a dispute window, timeout-based auto-refunds for abandoned markets, and emergency claim refunds.
+- **Resolution & Dispute Safeguards**: Owner-resolved markets include a dispute window, permissionless refunds after expiry when only one outcome has liquidity, and individual or batch refund claims.
 - **Multi-Outcome Engine**: Supports markets with 2 to 8 arbitrary outcomes (`createMultiMarket`, `betOutcome`, `resolveOutcome`).
-- **Batch Operations**: `claimMany` allows batch-claiming winnings across up to 32 markets in a single transaction.
+- **Batch Operations**: `claimMany` allows batch-claiming winnings or refunds across up to 50 markets in a single transaction.
 
 ---
 
@@ -78,7 +79,7 @@ The protocol uses a single-contract architecture managed with Foundry:
 
 ### Prerequisites
 
-- [Node.js](https://nodejs.org/) (v18+ or v20+)
+- [Node.js](https://nodejs.org/) (v20.19+ or v22.12+)
 - [Foundry](https://book.getfoundry.sh/) (`forge`, `cast`, `anvil`)
 
 ### 1. Clone & Install
@@ -92,7 +93,7 @@ git submodule update --init --recursive
 
 # Install frontend dependencies
 cd frontend
-npm install
+npm ci
 ```
 
 ### 2. Smart Contract Development

@@ -7,12 +7,18 @@
 | `sellPosition` broken for multi-outcome | Multi path updates `multiPools` / `multiSide` |
 | `cancelMarket` only binary | Multi cancel when only creator liquidity remains |
 | Underflow risk on bettor counters | Guard `> 0` before decrement |
+| Fresh checkout could not resolve Foundry imports | Track both Foundry dependency gitlinks at the commits pinned in `foundry.lock` |
+| `solvencyCheck` omitted funds escrowed in market pools | Track outstanding market liabilities through creation, bets, sells, cancellation, refunds, and claims |
+| Owner could resolve to an outcome with no winning positions | Reject unfunded winning outcomes in normal and dispute resolution paths |
 
-**Tests:** 67 passing (`forge test`)
+**Validation:** 73 passing (`forge test`); frontend lint/build pass; `npm audit` reports zero vulnerabilities.
 
 ## Frontend
 | Issue | Fix |
 |-------|-----|
+| Four high-severity transitive npm advisories | Apply non-breaking lockfile updates; `npm audit` now reports zero vulnerabilities |
+| Frontend checks were absent from CI | Add read-only workflow for install, audit, lint, and production build |
+| README allowed Node versions unsupported by Vite 8 | Require Node 20.19+ or 22.12+ in docs and `package.json` |
 | Corrupt localStorage crash | `safeJsonParse` / `safeLocal*` helpers |
 | `multiOdds([])` division by zero | Empty-array guard |
 | Smart account used as signing `account` | Display-only `smartAccount` |

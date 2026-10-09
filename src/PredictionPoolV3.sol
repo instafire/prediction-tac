@@ -38,6 +38,7 @@ contract PredictionPoolV3 is Ownable2Step, ReentrancyGuard {
     uint256 public marketCount;
     bool public paused;
     uint256 public totalVaultBalance; // sum of all user balances (solvency check)
+    uint256 public totalLockedPools; // outstanding market escrow not yet credited to user vaults
 
     enum Side {
         None,
@@ -240,6 +241,7 @@ contract PredictionPoolV3 is Ownable2Step, ReentrancyGuard {
 
         vaultBalance[msg.sender] -= stake;
         totalVaultBalance -= stake;
+        totalLockedPools += stake;
 
         uint256 marketId = ++marketCount;
         Market storage m = markets[marketId];
@@ -298,6 +300,7 @@ contract PredictionPoolV3 is Ownable2Step, ReentrancyGuard {
 
         vaultBalance[msg.sender] -= stake;
         totalVaultBalance -= stake;
+        totalLockedPools += stake;
 
         uint256 marketId = ++marketCount;
         Market storage m = markets[marketId];
@@ -348,6 +351,7 @@ contract PredictionPoolV3 is Ownable2Step, ReentrancyGuard {
         uint256 fee = (stake * protocolFee) / BASIS_POINTS;
         uint256 net = stake - fee;
         accumulatedFees += fee;
+        totalLockedPools += net;
 
         if (existing == Side.None) {
             m.side[msg.sender] = side;
@@ -393,6 +397,7 @@ contract PredictionPoolV3 is Ownable2Step, ReentrancyGuard {
         uint256 fee = (stake * protocolFee) / BASIS_POINTS;
         uint256 net = stake - fee;
         accumulatedFees += fee;
+        totalLockedPools += net;
 
         if (existing == 0) {
             m.multiSide[msg.sender] = outcomeIndex + 1;
@@ -438,6 +443,7 @@ contract PredictionPoolV3 is Ownable2Step, ReentrancyGuard {
         uint256 fee = (amount * protocolFee) / BASIS_POINTS;
         uint256 returned = amount - fee;
         accumulatedFees += fee;
+        totalLockedPools -= amount;
 
         m.amounts[msg.sender] = held - amount;
 
@@ -484,6 +490,7 @@ contract PredictionPoolV3 is Ownable2Step, ReentrancyGuard {
         require(block.timestamp >= m.resolutionTime, "Resolution time not reached");
         require(outcome == Side.Yes || outcome == Side.No, "Invalid outcome");
         require(m.outcomeCount <= 2, "Use resolveOutcome for multi");
+        require(outcome == Side.Yes ? m.totalYesPool > 0 : m.totalNoPool > 0, "No winning liquidity");
 
         m.status = Status.Resolved;
         m.winner = outcome;
@@ -500,6 +507,7 @@ contract PredictionPoolV3 is Ownable2Step, ReentrancyGuard {
         require(block.timestamp >= m.resolutionTime, "Resolution time not reached");
         require(m.outcomeCount >= 2, "Bad market");
         require(winningOutcome < m.outcomeCount, "Bad outcome");
+        require(m.multiPools[winningOutcome] > 0, "No winning liquidity");
 
         m.status = Status.Resolved;
         m.winnerOutcome = winningOutcome;
@@ -526,6 +534,7 @@ contract PredictionPoolV3 is Ownable2Step, ReentrancyGuard {
         require(m.status == Status.Disputed, "Not disputed");
         require(finalOutcome == Side.Yes || finalOutcome == Side.No, "Invalid outcome");
         require(m.outcomeCount <= 2, "Use resolveMultiDispute");
+        require(finalOutcome == Side.Yes ? m.totalYesPool > 0 : m.totalNoPool > 0, "No winning liquidity");
 
         m.status = Status.Resolved;
         m.winner = finalOutcome;
@@ -538,6 +547,7 @@ contract PredictionPoolV3 is Ownable2Step, ReentrancyGuard {
         Market storage m = markets[marketId];
         require(m.status == Status.Disputed, "Not disputed");
         require(finalOutcome < m.outcomeCount, "Bad outcome");
+        require(m.multiPools[finalOutcome] > 0, "No winning liquidity");
 
         m.status = Status.Resolved;
         m.winnerOutcome = finalOutcome;
@@ -568,6 +578,7 @@ contract PredictionPoolV3 is Ownable2Step, ReentrancyGuard {
             m.amounts[msg.sender] = 0;
             m.multiSide[msg.sender] = 0;
             m.hasClaimed[msg.sender] = true;
+            totalLockedPools -= refund;
             vaultBalance[msg.sender] += refund;
             totalVaultBalance += refund;
         } else {
@@ -577,6 +588,7 @@ contract PredictionPoolV3 is Ownable2Step, ReentrancyGuard {
             m.totalYesPool = 0;
             m.multiPools[0] = 0;
             m.hasClaimed[msg.sender] = true;
+            totalLockedPools -= refund;
             vaultBalance[msg.sender] += refund;
             totalVaultBalance += refund;
         }
@@ -613,6 +625,7 @@ contract PredictionPoolV3 is Ownable2Step, ReentrancyGuard {
         uint256 amount = m.amounts[msg.sender];
         require(amount > 0, "Nothing to refund");
 
+        totalLockedPools -= amount;
         vaultBalance[msg.sender] += amount;
         totalVaultBalance += amount;
 
@@ -655,6 +668,7 @@ contract PredictionPoolV3 is Ownable2Step, ReentrancyGuard {
                 if (m.side[msg.sender] == Side.None && m.multiSide[msg.sender] == 0) continue;
                 m.hasClaimed[msg.sender] = true;
                 uint256 amount = m.amounts[msg.sender];
+                totalLockedPools -= amount;
                 vaultBalance[msg.sender] += amount;
                 totalVaultBalance += amount;
                 totalPaid += amount;
@@ -699,6 +713,7 @@ contract PredictionPoolV3 is Ownable2Step, ReentrancyGuard {
             share = (m.amounts[user] * totalPool) / winnerPool;
         }
 
+        totalLockedPools -= share;
         vaultBalance[user] += share;
         totalVaultBalance += share;
         userStats[user].wins++;
@@ -854,7 +869,7 @@ contract PredictionPoolV3 is Ownable2Step, ReentrancyGuard {
 
     function solvencyCheck() public view returns (bool solvent, uint256 contractBalance, uint256 obligations) {
         contractBalance = address(this).balance;
-        obligations = totalVaultBalance + accumulatedFees;
+        obligations = totalVaultBalance + totalLockedPools + accumulatedFees;
         solvent = contractBalance >= obligations;
     }
 

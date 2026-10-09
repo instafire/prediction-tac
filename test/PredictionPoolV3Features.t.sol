@@ -88,6 +88,7 @@ contract PredictionPoolV3FeaturesTest is Test {
             100 ether,
             outcomes
         );
+        assertEq(pool.totalLockedPools(), 100 ether);
 
         (string[] memory labels, uint256[] memory pools,) = pool.getMultiMarket(id);
         assertEq(labels.length, 3);
@@ -98,6 +99,7 @@ contract PredictionPoolV3FeaturesTest is Test {
         pool.betOutcome(id, 1, 80 ether);
         vm.prank(carol);
         pool.betOutcome(id, 2, 60 ether);
+        assertEq(pool.totalLockedPools(), 100 ether + 78.4 ether + 58.8 ether);
 
         // cannot use binary bet on multi>2
         vm.prank(bob);
@@ -114,6 +116,7 @@ contract PredictionPoolV3FeaturesTest is Test {
         vm.prank(bob);
         pool.claim(id);
         assertGt(pool.vaultBalance(bob), bobBefore);
+        assertEq(pool.totalLockedPools(), 0);
 
         // alice lost
         uint256 aliceBefore = pool.vaultBalance(alice);
@@ -175,6 +178,45 @@ contract PredictionPoolV3FeaturesTest is Test {
         assertGt(pool.vaultBalance(alice), before);
     }
 
+    function test_ClaimManyRefundReleasesLockedPoolLiability() public {
+        vm.prank(alice);
+        pool.createMarket("One-sided?", "d", "crypto", uint64(block.timestamp + 7 days), 100 ether);
+        vm.warp(block.timestamp + 8 days);
+        pool.refundExpiredMarket(1);
+        assertEq(pool.totalLockedPools(), 100 ether);
+
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = 1;
+        vm.prank(alice);
+        pool.claimMany(ids);
+        assertEq(pool.totalLockedPools(), 0);
+    }
+
+    function test_MultiResolutionRejectsUnfundedWinner() public {
+        string[] memory outcomes = new string[](3);
+        outcomes[0] = "A";
+        outcomes[1] = "B";
+        outcomes[2] = "C";
+        vm.prank(alice);
+        uint256 id =
+            pool.createMultiMarket("Who?", "d", "sports", "src", uint64(block.timestamp + 3 days), 50 ether, outcomes);
+
+        vm.warp(block.timestamp + 4 days);
+        vm.prank(owner);
+        vm.expectRevert("No winning liquidity");
+        pool.resolveOutcome(id, 1);
+        vm.prank(owner);
+        pool.resolveOutcome(id, 0);
+
+        vm.prank(alice);
+        pool.dispute(id);
+        vm.prank(owner);
+        vm.expectRevert("No winning liquidity");
+        pool.resolveMultiDispute(id, 1);
+        vm.prank(owner);
+        pool.resolveMultiDispute(id, 0);
+    }
+
     function test_SellMultiPosition() public {
         string[] memory outcomes = new string[](3);
         outcomes[0] = "A";
@@ -190,6 +232,7 @@ contract PredictionPoolV3FeaturesTest is Test {
         vm.prank(bob);
         pool.sellPosition(id, held / 2);
         assertGt(pool.vaultBalance(bob), before);
+        assertEq(pool.totalLockedPools(), 100 ether + held - held / 2);
     }
 
     function test_MultiDispute() public {

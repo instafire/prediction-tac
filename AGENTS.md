@@ -3,7 +3,7 @@
 Peer-to-peer prediction market dApp for the TAC blockchain (EVM layer connected to TON/Telegram).
 
 ## Layout
-- `src/` — Solidity contracts (Foundry). `PredictionPoolV3.sol` is current: vault model, disputes, refunds, on-chain user stats. 53 tests pass (`forge test`).
+- `src/` — Solidity contracts (Foundry). `PredictionPoolV3.sol` is current: vault model, disputes, refunds, on-chain user stats. Run `forge test` for the full regression suite.
 - `frontend/` — Vite + React 19 + TypeScript + ethers v6. Single-page app in `frontend/src/App.tsx`, styles in `frontend/src/App.css`.
 - `script/DeployV3.s.sol` — deployment script.
 
@@ -19,7 +19,7 @@ Peer-to-peer prediction market dApp for the TAC blockchain (EVM layer connected 
 - Vault deposit/withdraw, create, bet, sellPosition, resolve, dispute, cancel, refundExpired, claim, claimRefund.
 - Owner trust model for resolution; fee cap 5%; reentrancy guards; solvencyCheck.
 - **Shipped upgrades:** `claimMany`, `createMarketWithSource`, `createMultiMarket` (2–8 outcomes), `betOutcome` / `resolveOutcome` / `resolveMultiDispute`, `getMarketMeta`, `getMultiMarket`, `getMarketsPage`, `postComment` (event-log comments).
-- Tests: `forge test` — PredictionPoolV3Test (35) + PredictionPoolV3FeaturesTest (6) + legacy suites.
+- Tests: `forge test` — current suite includes 39 core V3 tests, 10 V3 feature tests, 22 legacy tests, and 2 Foundry template tests.
 - ABI: after `forge build`, export `out/PredictionPoolV3.sol/PredictionPoolV3.json` → `frontend/src/abi.json`.
 
 ## UI/UX notes (July 2026 redesign, round 2)
@@ -46,7 +46,7 @@ Peer-to-peer prediction market dApp for the TAC blockchain (EVM layer connected 
 - Canonical/OG URLs in `index.html`, `public/sitemap.xml`, `public/robots.txt`, and `public/tonconnect-manifest.json` point at https://tac.chaty.lol.
 
 ## Round 4 — Security audit + UI polish (July 2026, delhi)
-- Re-hosted on this machine (previous host was bunda). Foundry reinstalled at /root/.foundry/bin; all 59 tests pass.
+- Re-hosted on this machine (previous host was bunda). Foundry is required for validation; all 73 current tests pass.
 - Wallet event listeners now use named handlers with cleanup (removeListener) to prevent duplicate handlers; chainChanged also clears the signer to avoid stale-network signing.
 - CSS polish pass: ≥40px touch targets on all buttons/chips (Telegram-friendly), consistent :active press states, external-link ↗ indicator, backdrop-blur normalized across panels. All additive at end of App.css.
 - Security review findings (contract): pull-payment + reentrancy guards + solvency invariant OK; owner-resolution is the main trust assumption (documented, not a bug). Fee capped 5%. No user-fund path for owner other than accumulatedFees.
