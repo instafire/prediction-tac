@@ -31,7 +31,19 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
         working-directory: frontend
-      - run: npm audit --audit-level=high
+      # npm audit gate with an explicit allowlist (frontend/scripts/audit-allowlist.mjs).
+      # A plain `npm audit --audit-level=high` fails on ANY high/critical
+      # advisory, including two with no in-range fix:
+      # - GHSA-gcqx-w48m-w2h4 (deepmerge >=4.2.0, prototype poisoning): no fix
+      #   available — 4.3.1 is the latest release and still vulnerable; pulled
+      #   in via @tonconnect/ui.
+      # - GHSA-mrhx-c7xc-m3w5 (zod <4.6.6, memory exhaustion): fix needs zod
+      #   >=4.6.6, but @ton/ton 16.3.0 (latest) declares zod ^3.21.4.
+      # The allowlist exempts exactly those two IDs; every other high/critical
+      # vulnerability still fails the build. Re-check the allowlist whenever
+      # @ton/ton or @tonconnect/ui move — the advisories themselves stay in
+      # the tree until upstream fixes them.
+      - run: node scripts/audit-allowlist.mjs
         working-directory: frontend
       - run: npm run lint
         working-directory: frontend
