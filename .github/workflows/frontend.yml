@@ -33,16 +33,22 @@ jobs:
         working-directory: frontend
       # npm audit gate with an explicit allowlist (frontend/scripts/audit-allowlist.mjs).
       # A plain `npm audit --audit-level=high` fails on ANY high/critical
-      # advisory, including two with no in-range fix:
+      # advisory, including one with no in-range fix:
+      # - GHSA-mrhx-c7xc-m3w5 (zod <4.6.6, memory exhaustion, high): fix needs
+      #   zod >=4.6.6, but @ton/ton 16.3.0 (latest) declares zod ^3.21.4. The
+      #   high severity propagates to its dependents (@ton/ton,
+      #   @tonappchain/ton-lite-client, @tonappchain/sdk), which the script
+      #   exempts transitively — a package is exempt only when every advisory
+      #   at the root of its dependency chain is allowlisted.
       # - GHSA-gcqx-w48m-w2h4 (deepmerge >=4.2.0, prototype poisoning): no fix
       #   available — 4.3.1 is the latest release and still vulnerable; pulled
-      #   in via @tonconnect/ui.
-      # - GHSA-mrhx-c7xc-m3w5 (zod <4.6.6, memory exhaustion): fix needs zod
-      #   >=4.6.6, but @ton/ton 16.3.0 (latest) declares zod ^3.21.4.
-      # The allowlist exempts exactly those two IDs; every other high/critical
-      # vulnerability still fails the build. Re-check the allowlist whenever
-      # @ton/ton or @tonconnect/ui move — the advisories themselves stay in
-      # the tree until upstream fixes them.
+      #   in via @tonconnect/ui. Rated low, so it does not block the gate
+      #   today; it is allowlisted so a future re-rating does not break the
+      #   build without review.
+      # Every other high/critical vulnerability still fails the build.
+      # Re-check the allowlist whenever @ton/ton, @tonconnect/ui, or the
+      # advisories themselves move — the advisories stay in the tree until
+      # upstream fixes them.
       - run: node scripts/audit-allowlist.mjs
         working-directory: frontend
       - run: npm run lint
